@@ -36,7 +36,10 @@ window. This is that app for the Hub, as small as it can be.
   when a meeting misbehaves.
 - Keeps the display awake, restarts its page on a crash, shows "Waiting for the network…" until the Hub loads after a
   reboot, F12 opens DevTools for whoever is on site.
-- Updates itself from GitHub releases, installing only between 02:00 and 05:00 when nothing is on.
+- Updates arrive by themselves: the setup script's **CoreChem Screen update** task (Windows, SYSTEM, every 15 min)
+  installs a newer release silently when nothing is live (the app keeps `%LOCALAPPDATA%\CoreChemScreen\busy` fresh
+  during a share / meeting) and the launcher restarts the app. The app itself only looks for updates and logs them —
+  installing from the user session would raise an admin prompt on a per-machine install.
 
 ## Page API (`window.coreChemScreen`, version 1)
 

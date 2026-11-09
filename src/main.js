@@ -86,6 +86,20 @@ function log(...a) {
   // the Hub page ships every line to the relay (Screens → Control → Log), so nobody reads a log off a TV
   try { if (win && !win.isDestroyed()) win.webContents.send('screen:log', line); } catch { /* window going away */ }
 }
+// %LOCALAPPDATA%\CoreChemScreen\busy exists (and is touched every minute) while a share or meeting is live. The
+// setup script's "CoreChem Screen update" task (SYSTEM, every 15 min) installs a newer release only when no such
+// file is fresh, then the launcher restarts the app — no admin prompt on the TV, no update mid-meeting.
+const BUSY_FILE = path.join(LOG_DIR, 'busy');
+function updateBusyFlag() {
+  const busy = pageBusy || !!meeting;
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    if (busy) fs.writeFileSync(BUSY_FILE, new Date().toISOString());
+    else fs.rmSync(BUSY_FILE, { force: true });
+  } catch { /* fine */ }
+}
+setInterval(updateBusyFlag, 60_000);
+
 // the last part of the log file, for the page to ship once at start (what happened before this page loaded)
 function logTail(bytes) {
   try {
@@ -244,6 +258,7 @@ async function openMeeting({ session: sess, url, name }) {
   wc.loadURL(meeting.url).catch((err) => log('meeting loadURL rejected', err));
   log('meeting opened', meeting.url.slice(0, 60), 'as', meeting.name || '(no name)');
   sendState('opened');
+  updateBusyFlag();
   return true;
 }
 
@@ -256,6 +271,7 @@ function closeMeeting(reason) {
   try { m.view.webContents.close(); } catch { /* already gone */ }
   log('meeting closed:', reason);
   sendState('ended', reason, m.session);
+  updateBusyFlag();
   return true;
 }
 
@@ -266,7 +282,7 @@ const fromMeeting = (e) => !!meeting && e.sender === meeting.view.webContents;
 ipcMain.handle('screen:info', (e) => (fromDisplay(e) ? { app: 'corechem-screen', version: app.getVersion(), hub: cfg.hub } : null));
 ipcMain.handle('screen:log-tail', (e, bytes) => (fromDisplay(e) ? logTail(bytes) : ''));
 ipcMain.on('screen:name', (e, name) => { if (fromDisplay(e)) screenName = String(name || '').slice(0, 80); });
-ipcMain.on('screen:busy', (e, b) => { if (fromDisplay(e)) pageBusy = !!b; });
+ipcMain.on('screen:busy', (e, b) => { if (fromDisplay(e)) { pageBusy = !!b; updateBusyFlag(); } });
 ipcMain.handle('screen:open-meeting', async (e, args) => fromDisplay(e) && !!args && openMeeting({ session: args.session, url: args.url, name: args.name }));
 ipcMain.handle('screen:close-meeting', (e) => fromDisplay(e) && closeMeeting('closed from the Hub'));
 ipcMain.handle('screen:restart', (e) => { if (!fromDisplay(e)) return false; app.relaunch(); app.exit(0); return true; });
@@ -297,24 +313,19 @@ ipcMain.on('meeting:event', (e, ev) => {
   }
 });
 
-// ---------------------------------------------------------------- updates (GitHub releases; quiet hours only)
+// ---------------------------------------------------------------- updates
+// The app only LOOKS for a newer release (and logs it). Installing is the setup script's "CoreChem Screen update"
+// task: it runs as SYSTEM every 15 min, so a per-machine install updates with no admin prompt on the TV, and it
+// waits while the busy flag above is fresh. (electron-updater installing from the user session would raise UAC.)
 function setupUpdates() {
   if (!app.isPackaged) return;
   let autoUpdater;
   try { ({ autoUpdater } = require('electron-updater')); } catch { return; }
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.allowDowngrade = false;
-  autoUpdater.on('error', (err) => log('update error', err && err.message));
-  autoUpdater.on('update-downloaded', (info) => {
-    log('update downloaded', info && info.version);
-    const tryInstall = () => {                         // install when nothing is on and the office is empty
-      const h = new Date().getHours();
-      if (!pageBusy && !meeting && h >= 2 && h < 5) { log('installing update'); autoUpdater.quitAndInstall(true, true); }
-      else setTimeout(tryInstall, 10 * 60_000);
-    };
-    tryInstall();
-  });
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+  autoUpdater.on('error', (err) => log('update check error', err && err.message));
+  autoUpdater.on('update-available', (info) => log('update available:', info && info.version, '(the CoreChem Screen update task installs it within 15 min when nothing is live)'));
+  autoUpdater.on('update-not-available', () => log('up to date', app.getVersion()));
   const check = () => autoUpdater.checkForUpdates().catch(() => undefined);
   setTimeout(check, 90_000);
   setInterval(check, 6 * 3600_000);
