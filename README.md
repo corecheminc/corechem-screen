@@ -24,6 +24,9 @@ window. This is that app for the Hub, as small as it can be.
 - Camera / mic are granted only to the Hub and the meeting hosts; the meeting view may only navigate the meeting
   hosts and their sign-in pages; the main window may only show the Hub. The app holds **no secrets** — a screen gets
   its token when its pairing code is entered in the Hub, exactly as before.
+- Presents a plain Chrome user agent (Teams and Meet turn an "Electron/…" one away with a blank page) and writes
+  `%LOCALAPPDATA%\CoreChemScreen\app.log` — where the meeting page went and what it complained about; paste it
+  when a meeting misbehaves.
 - Keeps the display awake, restarts its page on a crash, shows "Waiting for the network…" until the Hub loads after a
   reboot, F12 opens DevTools for whoever is on site.
 - Updates itself from GitHub releases, installing only between 02:00 and 05:00 when nothing is on.

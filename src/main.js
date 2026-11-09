@@ -23,7 +23,7 @@ const HUBS = new Set(['https://app.corecheminc.com', 'https://corecheminc-hub.ve
 // Same rule as dash_meeting_url_ok() in SQL and meetingUrlOk() in the Hub: what a meeting link may be.
 const MEETING_HOST = /^https:\/\/([a-z0-9-]+\.)*(teams\.microsoft\.com|teams\.live\.com|zoom\.us|zoom\.com|meet\.google\.com)(\/|$)/i;
 // Where an opened meeting may move on to (launcher pages, sign-in, the vendors' CDNs); anything else is refused.
-const MEETING_NAV = /^https:\/\/([a-z0-9-]+\.)*(teams\.microsoft\.com|teams\.live\.com|teams\.cdn\.office\.net|microsoft\.com|microsoftonline\.com|office\.com|office\.net|live\.com|skype\.com|zoom\.us|zoom\.com|meet\.google\.com|google\.com|gstatic\.com|googleapis\.com|youtube\.com)(\/|$)/i;
+const MEETING_NAV = /^https:\/\/([a-z0-9-]+\.)*(teams\.microsoft\.com|teams\.live\.com|cloud\.microsoft|teams\.cdn\.office\.net|microsoft\.com|microsoftonline\.com|msftauth\.net|msauth\.net|office\.com|office\.net|live\.com|skype\.com|sharepoint\.com|zoom\.us|zoom\.com|meet\.google\.com|google\.com|gstatic\.com|googleapis\.com|youtube\.com)(\/|$)/i;
 const RTC_PORTS = { min: 50000, max: 50999 };   // matches the firewall rule the setup script writes
 
 // ---------------------------------------------------------------- config
@@ -44,6 +44,11 @@ function readConfig() {
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');          // boards' sound, shares, meetings
 app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');       // advertise the real LAN address:
                                                                                         // a presenter's laptop connects straight to this PC
+// A plain Chrome identity. Teams and Meet turn an "Electron/…" user agent away with a blank page (first mini PC test,
+// 2026-11-09: a Teams link opened white). Nothing else in the UA changes — same Chromium, same OS.
+app.userAgentFallback = app.userAgentFallback
+  .replace(/\(KHTML, like Gecko\)\s.*?\sChrome\//, '(KHTML, like Gecko) Chrome/')
+  .replace(/\sElectron\/[\d.]+/, '');
 if (!app.requestSingleInstanceLock()) app.quit();
 
 const cfg = readConfig();
@@ -54,7 +59,19 @@ let pageBusy = false;       // a share or meeting is live on the page (postpones
 let loadTimer = null;
 let loadFails = 0;
 
-const log = (...a) => console.log(new Date().toISOString(), ...a);
+// %LOCALAPPDATA%\CoreChemScreen\app.log — what the app and the meeting page did (2 MB, one rotation). Paste it when
+// a meeting misbehaves; nothing in it is secret (URLs of meeting pages, console messages, state changes).
+const LOG_DIR = path.join(process.env.LOCALAPPDATA || process.env.TEMP || '.', 'CoreChemScreen');
+const LOG_FILE = path.join(LOG_DIR, 'app.log');
+function log(...a) {
+  const line = `${new Date().toISOString()} ${a.map((x) => (x instanceof Error ? x.message : String(x))).join(' ')}`;
+  console.log(line);
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    try { if (fs.statSync(LOG_FILE).size > 2_000_000) fs.renameSync(LOG_FILE, `${LOG_FILE}.1`); } catch { /* no file yet */ }
+    fs.appendFileSync(LOG_FILE, `${line}\n`);
+  } catch { /* read-only profile — console only */ }
+}
 
 // ---------------------------------------------------------------- permissions: Hub + meeting hosts only
 // no 'display-capture': the TV is the receiver of shares, it never captures its own screen
@@ -151,6 +168,17 @@ function openMeeting({ session, url, name }) {
   wc.on('did-fail-load', (_e, code, desc, _u, isMainFrame) => { if (isMainFrame && code !== -3) { log('meeting load failed', code, desc); sendState('error', desc); } });
   wc.on('render-process-gone', (_e, d) => { log('meeting renderer gone', d.reason); if (meeting && meeting.view === view) closeMeeting('crashed'); });
   wc.on('page-title-updated', (e) => e.preventDefault());
+  // diagnostics for the log file: where the meeting page went and what it complained about
+  wc.on('did-navigate', (_e, u) => log('meeting at', String(u).slice(0, 200)));
+  wc.on('did-navigate-in-page', (_e, u, isMainFrame) => { if (isMainFrame) log('meeting at (in-page)', String(u).slice(0, 200)); });
+  wc.on('did-finish-load', () => log('meeting loaded', wc.getURL().slice(0, 200), '| title:', wc.getTitle().slice(0, 80)));
+  wc.on('will-redirect', (_e, u) => log('meeting redirect', String(u).slice(0, 200)));
+  wc.on('preload-error', (_e, p, err) => log('meeting preload error', p, err));
+  wc.on('console-message', (e, ...rest) => {           // Electron ≥ 35 passes one event object; older ones (level, message, …)
+    const d = e && typeof e === 'object' && 'message' in e ? e : { level: rest[0], message: rest[1] };
+    const lvl = String(d.level);
+    if (lvl === 'error' || lvl === 'warning' || lvl === '2' || lvl === '3') log('meeting console', lvl, String(d.message).slice(0, 300));
+  });
   win.contentView.addChildView(view);
   layoutView();
   wc.loadURL(meeting.url).catch(() => undefined);
