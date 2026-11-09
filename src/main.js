@@ -141,7 +141,18 @@ function createWindow() {
 function layoutView() {
   if (!meeting || !win) return;
   const [width, height] = win.getContentSize();
-  meeting.view.setBounds({ x: 0, y: 0, width, height });
+  if (meeting.revealed) meeting.view.setBounds({ x: 0, y: 0, width, height });
+  else meeting.view.setBounds({ x: Math.max(0, width - 2), y: Math.max(0, height - 2), width: 2, height: 2 });
+}
+// Show the meeting view once its page has content (preload reports 'content' / 'named' / 'joined'), or after 40 s
+// regardless. Until then it is a 2×2 dot — still "visible" to the page, so Teams keeps loading at full speed — and
+// the boards stay up with the Hub page's "Opening Teams… joining as <screen>" line.
+function revealMeeting(why) {
+  if (!meeting || meeting.revealed) return;
+  meeting.revealed = true;
+  layoutView();
+  log('meeting shown:', why);
+  sendState('shown', why);
 }
 function sendState(state, reason, sess) {
   if (!win) return;
@@ -159,13 +170,19 @@ function openMeeting({ session, url, name }) {
       backgroundThrottling: false, spellcheck: false,
     },
   });
-  meeting = { session: String(session || ''), url: String(url), name: String(name || screenName || ''), view, startedAt: Date.now() };
+  meeting = { session: String(session || ''), url: String(url), name: String(name || screenName || ''), view, startedAt: Date.now(), revealed: false };
   const wc = view.webContents;
   wc.setWebRTCUDPPortRange(RTC_PORTS);
+  try { view.setBackgroundColor('#0b1220'); } catch { /* older Electron */ }
+  setTimeout(() => { if (meeting && meeting.view === view) revealMeeting('40 s passed'); }, 40_000);
   // Teams' launcher sometimes targets a new window for "continue on this browser" — keep it in this view
   wc.setWindowOpenHandler(({ url: u }) => { if (MEETING_NAV.test(u)) wc.loadURL(u).catch(() => undefined); return { action: 'deny' }; });
   wc.on('will-navigate', (e, u) => { if (!MEETING_NAV.test(u)) { log('meeting navigation refused', u.slice(0, 80)); e.preventDefault(); } });
-  wc.on('did-fail-load', (_e, code, desc, _u, isMainFrame) => { if (isMainFrame && code !== -3) { log('meeting load failed', code, desc); sendState('error', desc); } });
+  wc.on('did-fail-load', (_e, code, desc, _u, isMainFrame) => {
+    if (!isMainFrame || code === -3) return;
+    log('meeting load failed', code, desc);
+    if (meeting && meeting.view === view) { closeMeeting(`load failed: ${desc}`); sendState('error', desc, meeting && meeting.session); }
+  });
   wc.on('render-process-gone', (_e, d) => { log('meeting renderer gone', d.reason); if (meeting && meeting.view === view) closeMeeting('crashed'); });
   wc.on('page-title-updated', (e) => e.preventDefault());
   // diagnostics for the log file: where the meeting page went and what it complained about
@@ -181,7 +198,7 @@ function openMeeting({ session, url, name }) {
   });
   win.contentView.addChildView(view);
   layoutView();
-  wc.loadURL(meeting.url).catch(() => undefined);
+  wc.loadURL(meeting.url).catch((err) => log('meeting loadURL rejected', err));
   log('meeting opened', meeting.url.slice(0, 60), 'as', meeting.name || '(no name)');
   sendState('opened');
   return true;
@@ -217,8 +234,14 @@ ipcMain.handle('meeting:config', (e) => (fromMeeting(e) ? { name: meeting.name |
 ipcMain.on('meeting:event', (e, ev) => {
   if (!fromMeeting(e)) return;
   const kind = String(ev || '');
+  if (kind.startsWith('text:')) {                        // what the page says right now — log + a hint for the Hub page
+    log('meeting says:', kind.slice(5, 165));
+    sendState('text', kind.slice(5, 165));
+    return;
+  }
   log('meeting event', kind);
   sendState(kind);
+  if (kind === 'content' || kind === 'named' || kind === 'joined' || kind === 'audio') revealMeeting(kind);
   if (kind === 'left') {                                 // the meeting ended on its side — take the view down shortly
     const v = meeting.view;
     setTimeout(() => { if (meeting && meeting.view === v) closeMeeting('left'); }, 4_000);
