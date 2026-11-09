@@ -37,8 +37,10 @@ jobs:
       # electron-builder uploads the installer, its blockmap and latest.yml in parallel and creates the release on
       # first contact — on 2026-11-09 that made TWO release objects for one tag (v0.1.0 and v0.1.1 each), one holding
       # only the blockmap and marked "latest", so …/releases/latest/download/ 404'd. Creating the release first means
-      # electron-builder only ever uploads into it.
-      - name: Create the release first (one object per tag)
+      # electron-builder only ever uploads into it. It is created as a DRAFT: a draft is never "latest", so the
+      # download URL keeps pointing at the previous whole release until this one is complete (the same night a
+      # reinstall hit the few minutes between "release created" and "installer uploaded" and failed).
+      - name: Create the release first, as a draft (one object per tag)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
@@ -46,7 +48,7 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           gh release view $tag 2>$null
-          if ($LASTEXITCODE -ne 0) { gh release create $tag --title $tag --notes "CoreChem Screen $tag" --latest }
+          if ($LASTEXITCODE -ne 0) { gh release create $tag --title $tag --notes "CoreChem Screen $tag" --draft }
       - name: Build installer (publish when tagged)
         shell: pwsh
         env:
@@ -54,16 +56,18 @@ jobs:
         run: |
           if ("${{ github.ref }}".StartsWith('refs/tags/v')) { npx electron-builder --win --publish always }
           else { npx electron-builder --win --publish never }
-      - name: Check the release is whole
+      - name: Check the release is whole, then publish it as latest
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $names = gh release view "${{ github.ref_name }}" --json assets --jq '.assets[].name'
+          $tag = "${{ github.ref_name }}"
+          $names = gh release view $tag --json assets --jq '.assets[].name'
           foreach ($need in @('CoreChemScreen-Setup.exe', 'latest.yml')) {
             if ($names -notcontains $need) { throw "release is missing $need (assets: $($names -join ', '))" }
           }
+          gh release edit $tag --draft=false --latest
       - uses: actions/upload-artifact@v4
         with:
           name: CoreChemScreen-Setup
