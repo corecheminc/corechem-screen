@@ -23,6 +23,8 @@ window. This is that app for the Hub, as small as it can be.
 - The view stays a 2×2 px dot until the page shows something (Teams paints nothing for 15–20 s while it "gets things
   ready"), then fills the screen; the Hub page says "Opening Teams… joining as <screen>" meanwhile. What the page says
   is logged every few seconds until joined.
+- The meeting view runs in its own in-memory session, wiped before every meeting: nothing a meeting site stores
+  (cookies, a service worker and its cached app shell) carries over, and the Hub page's storage is never shared with it.
 - `closeMeeting()` destroys the view. It cannot be refused.
 - Camera / mic are granted only to the Hub and the meeting hosts; the meeting view may only navigate the meeting
   hosts and their sign-in pages; the main window may only show the Hub. The app holds **no secrets** — a screen gets

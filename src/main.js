@@ -25,6 +25,12 @@ const MEETING_HOST = /^https:\/\/([a-z0-9-]+\.)*(teams\.microsoft\.com|teams\.li
 // Where an opened meeting may move on to (launcher pages, sign-in, the vendors' CDNs); anything else is refused.
 const MEETING_NAV = /^https:\/\/([a-z0-9-]+\.)*(teams\.microsoft\.com|teams\.live\.com|cloud\.microsoft|teams\.cdn\.office\.net|microsoft\.com|microsoftonline\.com|msftauth\.net|msauth\.net|office\.com|office\.net|live\.com|skype\.com|sharepoint\.com|zoom\.us|zoom\.com|meet\.google\.com|google\.com|gstatic\.com|googleapis\.com|youtube\.com)(\/|$)/i;
 const RTC_PORTS = { min: 50000, max: 50999 };   // matches the firewall rule the setup script writes
+// The meeting view runs in its own in-memory session, wiped before every meeting: nothing a meeting site stores
+// (cookies, IndexedDB, a service worker and its cached app shell) survives into the next one or into a restart,
+// and the Hub page's own storage (the screen token) is never shared with Teams / Zoom / Meet. First mini PC test,
+// 2026-11-09: after the first (Electron-UA) visit Teams kept serving its cached signed-in shell with a spinner
+// forever, on every later version, because that state lived in the shared default session.
+const MEETING_PARTITION = 'meeting';
 
 // ---------------------------------------------------------------- config
 function readConfig() {
@@ -54,6 +60,7 @@ if (!app.requestSingleInstanceLock()) app.quit();
 const cfg = readConfig();
 let win = null;             // the Hub page
 let meeting = null;         // { session, url, view, startedAt }
+let pendingOpen = null;     // an openMeeting() still wiping the meeting session
 let screenName = '';        // the paired screen's name, from the Hub page (used as the meeting display name)
 let pageBusy = false;       // a share or meeting is live on the page (postpones a quiet update)
 let loadTimer = null;
@@ -130,7 +137,7 @@ function createWindow() {
   win.webContents.setWebRTCUDPPortRange(RTC_PORTS);
   // an older Hub page still calling window.open() for a meeting gets the owned view instead of a popup
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (MEETING_HOST.test(url)) openMeeting({ session: '', url, name: screenName });
+    if (MEETING_HOST.test(url)) void openMeeting({ session: '', url, name: screenName });
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => { if (!originOk(url) || !url.startsWith(cfg.hub)) e.preventDefault(); });
@@ -174,13 +181,29 @@ function sendState(state, reason, sess) {
   win.webContents.send('screen:meeting-state', { state, reason: reason || null, session: sess || (meeting && meeting.session) || '' });
 }
 
-function openMeeting({ session, url, name }) {
+let meetingSessionReady = false;
+async function freshMeetingSession() {
+  const ses = session.fromPartition(MEETING_PARTITION);
+  if (!meetingSessionReady) { setupSession(ses); meetingSessionReady = true; }
+  try { await ses.clearStorageData(); } catch (err) { log('meeting session clear failed', err); }
+  try { await ses.clearCache(); } catch { /* fine */ }
+  return ses;
+}
+
+async function openMeeting({ session: sess, url, name }) {
   if (!win) return false;
   if (!MEETING_HOST.test(String(url))) { log('meeting refused (host)', String(url).slice(0, 80)); return false; }
   closeMeeting('replaced');
+  const opening = { sess: String(sess || '') };
+  pendingOpen = opening;
+  await freshMeetingSession();
+  if (pendingOpen !== opening || !win) return false;          // another open / close came in meanwhile
+  pendingOpen = null;
+  const session = opening.sess;
   const view = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, 'preload-meeting.js'),
+      partition: MEETING_PARTITION,
       contextIsolation: true, sandbox: true, nodeIntegration: false,
       backgroundThrottling: false, spellcheck: false,
     },
@@ -220,6 +243,7 @@ function openMeeting({ session, url, name }) {
 }
 
 function closeMeeting(reason) {
+  pendingOpen = null;                                   // a close while still opening wins
   if (!meeting) return false;
   const m = meeting;
   meeting = null;
@@ -238,7 +262,7 @@ ipcMain.handle('screen:info', (e) => (fromDisplay(e) ? { app: 'corechem-screen',
 ipcMain.handle('screen:log-tail', (e, bytes) => (fromDisplay(e) ? logTail(bytes) : ''));
 ipcMain.on('screen:name', (e, name) => { if (fromDisplay(e)) screenName = String(name || '').slice(0, 80); });
 ipcMain.on('screen:busy', (e, b) => { if (fromDisplay(e)) pageBusy = !!b; });
-ipcMain.handle('screen:open-meeting', (e, args) => fromDisplay(e) && !!args && openMeeting({ session: args.session, url: args.url, name: args.name }));
+ipcMain.handle('screen:open-meeting', async (e, args) => fromDisplay(e) && !!args && openMeeting({ session: args.session, url: args.url, name: args.name }));
 ipcMain.handle('screen:close-meeting', (e) => fromDisplay(e) && closeMeeting('closed from the Hub'));
 ipcMain.handle('screen:restart', (e) => { if (!fromDisplay(e)) return false; app.relaunch(); app.exit(0); return true; });
 ipcMain.handle('screen:reboot', (e) => {
