@@ -36,6 +36,6 @@
       "artifactName": "CoreChemScreen-Setup.${ext}",
       "shortcutName": "CoreChem Screen"
     },
-    "publish": [{ "provider": "github", "owner": "corecheminc", "repo": "corechem-screen-releases", "releaseType": "release" }]
+    "publish": [{ "provider": "github", "owner": "corecheminc", "repo": "corechem-screen", "releaseType": "release" }]
   }
 }

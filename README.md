@@ -1,7 +1,7 @@
 # CoreChem Screen — the office-TV app
 
 The Windows app that runs on the mini PC behind each office TV. It replaces "Chrome in kiosk mode" from the first
-version of the screen setup (`public/screen-setup/CoreChemScreen-Setup.cmd`, spec `docs/screens-present-spec.md`).
+version of the screen setup (Hub repo: `public/screen-setup/CoreChemScreen-Setup.cmd`, spec `docs/screens-present-spec.md`).
 
 ## Why an app
 
@@ -49,16 +49,21 @@ script; the test site is the only other value accepted). `--hub=<url>` overrides
 
 ## Build and release
 
-GitHub Actions `.github/workflows/screen-app-release.yml` builds the NSIS installer on `windows-latest`. Pushing a
-tag `screen-v<version>` (matching `package.json`) publishes `CoreChemScreen-Setup.exe` + `latest.yml` to the public
-releases-only repo **corecheminc/corechem-screen-releases** (secret `SCREEN_RELEASES_TOKEN`, a fine-grained PAT with
-Contents read/write on that repo alone). The setup script installs from
-`https://github.com/corecheminc/corechem-screen-releases/releases/latest/download/CoreChemScreen-Setup.exe`
-(silent: `/S`, per machine), and `electron-updater` checks the same place. A manual run of the workflow builds
-without publishing and attaches the installer as a workflow artifact.
+This app lives in its own **public** repo, `corecheminc/corechem-screen` (the Hub itself is private). Public on
+purpose: the mini PCs download the installer with no login, `electron-updater` checks the same place, and the build
+publishes with GitHub's own `GITHUB_TOKEN` — no long-lived access token anywhere. There is nothing secret in here:
+the Hub's public addresses, the meeting hosts, and the join-screen automation.
+
+`.github/workflows/release.yml` builds the NSIS installer on `windows-latest`. Bump `version` in `package.json`,
+commit, push a tag `v<version>` → `CoreChemScreen-Setup.exe` + `latest.yml` appear on the release. The Hub's setup
+script installs from `https://github.com/corecheminc/corechem-screen/releases/latest/download/CoreChemScreen-Setup.exe`
+(silent `/S`, per machine). A manual run of the workflow builds without publishing (workflow artifact).
 
 The installer is not code-signed (SmartScreen warns once on a double-click; the setup script's PowerShell download
 carries no mark-of-the-web, so it doesn't). Signing (~$200–400/yr) is the one improvement worth buying later.
+
+The Hub side of this (the page bridge `src/lib/screenApp.ts`, `DisplayPage.tsx`, the setup script, spec §7) is in
+the private Hub repo `corecheminc/corecheminc-hub`.
 
 ## Develop
 
@@ -71,4 +76,4 @@ npm run dist         # local Windows build (on Windows)
 
 Vendors change their join screens now and then. Every lookup in `preload-meeting.js` has a data-attribute first
 choice and a visible-text fallback; a miss means someone clicks Join on the TV, nothing worse. Bump `version` in
-`package.json`, tag `screen-v…`, done.
+`package.json`, tag `v…`, done.

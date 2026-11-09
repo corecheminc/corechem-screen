@@ -57,7 +57,8 @@ let loadFails = 0;
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ---------------------------------------------------------------- permissions: Hub + meeting hosts only
-const ALLOWED_PERMS = new Set(['media', 'display-capture', 'fullscreen', 'notifications', 'speaker-selection', 'clipboard-read', 'clipboard-sanitized-write']);
+// no 'display-capture': the TV is the receiver of shares, it never captures its own screen
+const ALLOWED_PERMS = new Set(['media', 'fullscreen', 'notifications', 'speaker-selection', 'clipboard-read', 'clipboard-sanitized-write']);
 function originOk(url) {
   try { const o = new URL(url).origin; return HUBS.has(o) || MEETING_HOST.test(o + '/'); } catch { return false; }
 }
@@ -67,8 +68,6 @@ function setupSession(ses) {
     callback(ALLOWED_PERMS.has(permission) && originOk(url));
   });
   ses.setPermissionCheckHandler((_wc, permission, origin) => ALLOWED_PERMS.has(permission) && originOk(origin + '/'));
-  // the TV never needs to pick a screen to share — it is the receiver; a meeting site asking is refused
-  ses.setDisplayMediaRequestHandler((_req, callback) => callback({}));
 }
 
 // ---------------------------------------------------------------- the Hub page
