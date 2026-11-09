@@ -71,6 +71,21 @@ function log(...a) {
     try { if (fs.statSync(LOG_FILE).size > 2_000_000) fs.renameSync(LOG_FILE, `${LOG_FILE}.1`); } catch { /* no file yet */ }
     fs.appendFileSync(LOG_FILE, `${line}\n`);
   } catch { /* read-only profile — console only */ }
+  // the Hub page ships every line to the relay (Screens → Control → Log), so nobody reads a log off a TV
+  try { if (win && !win.isDestroyed()) win.webContents.send('screen:log', line); } catch { /* window going away */ }
+}
+// the last part of the log file, for the page to ship once at start (what happened before this page loaded)
+function logTail(bytes) {
+  try {
+    const fd = fs.openSync(LOG_FILE, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const n = Math.min(size, Math.max(0, Math.min(Number(bytes) || 0, 64_000)));
+      const buf = Buffer.alloc(n);
+      fs.readSync(fd, buf, 0, n, size - n);
+      return buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { return ''; }
 }
 
 // ---------------------------------------------------------------- permissions: Hub + meeting hosts only
@@ -220,6 +235,7 @@ const fromDisplay = (e) => !!win && e.sender === win.webContents && originOk(e.s
 const fromMeeting = (e) => !!meeting && e.sender === meeting.view.webContents;
 
 ipcMain.handle('screen:info', (e) => (fromDisplay(e) ? { app: 'corechem-screen', version: app.getVersion(), hub: cfg.hub } : null));
+ipcMain.handle('screen:log-tail', (e, bytes) => (fromDisplay(e) ? logTail(bytes) : ''));
 ipcMain.on('screen:name', (e, name) => { if (fromDisplay(e)) screenName = String(name || '').slice(0, 80); });
 ipcMain.on('screen:busy', (e, b) => { if (fromDisplay(e)) pageBusy = !!b; });
 ipcMain.handle('screen:open-meeting', (e, args) => fromDisplay(e) && !!args && openMeeting({ session: args.session, url: args.url, name: args.name }));

@@ -1,7 +1,7 @@
 {
   "name": "corechem-screen",
   "productName": "CoreChem Screen",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "CoreChem Hub office-screen app: shows the Hub's TV page full-screen and hosts Teams / Zoom / Meet meetings inside it, joined under the screen's name.",
   "main": "src/main.js",
   "private": true,

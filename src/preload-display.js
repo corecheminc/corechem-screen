@@ -5,8 +5,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('coreChemScreen', {
-  /** bump when the shape of this API changes; the Hub page can feature-test on it */
-  version: 1,
+  /** bump when the shape of this API changes; the Hub page can feature-test on it (2 = onLog / logTail) */
+  version: 2,
   /** the paired screen's name — used as the display name in meetings */
   setScreenName: (name) => ipcRenderer.send('screen:name', String(name == null ? '' : name)),
   /** a share or meeting is live on the page (postpones a quiet app update) */
@@ -27,4 +27,12 @@ contextBridge.exposeInMainWorld('coreChemScreen', {
   rebootPc: () => ipcRenderer.invoke('screen:reboot'),
   /** { app, version, hub } */
   info: () => ipcRenderer.invoke('screen:info'),
+  /** every line the app logs, as it happens — the page ships them to the relay (Screens → Control → Log) */
+  onLog: (cb) => {
+    const handler = (_e, line) => { try { cb(String(line)); } catch { /* page's problem */ } };
+    ipcRenderer.on('screen:log', handler);
+    return () => ipcRenderer.removeListener('screen:log', handler);
+  },
+  /** the last `bytes` of the app's log file (≤ 64 KB) — what happened before this page loaded */
+  logTail: (bytes) => ipcRenderer.invoke('screen:log-tail', Number(bytes) || 12000),
 });

@@ -45,6 +45,7 @@ window. This is that app for the Hub, as small as it can be.
 | `onMeetingState(cb) → unsubscribe` | `{state: opened · launcher · named · joined · left · ended · error, reason, session}` |
 | `restartApp()`, `rebootPc()` | for Screens → Control (the page decides who may ask) |
 | `info() → {app, version, hub}` | shown in Screens |
+| `onLog(cb) → unsubscribe`, `logTail(bytes)` | (v2) every log line as it happens, and the file's tail at start — the page ships them to the relay's `/display/log`; Screens → Control shows the last lines |
 
 The Hub page keeps working in a plain browser: it feature-tests `window.coreChemScreen` and falls back to the popup.
 
