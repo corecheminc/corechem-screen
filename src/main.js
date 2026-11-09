@@ -50,6 +50,11 @@ function readConfig() {
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');          // boards' sound, shares, meetings
 app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');       // advertise the real LAN address:
                                                                                         // a presenter's laptop connects straight to this PC
+// Teams' call engine needs SharedArrayBuffer for its audio decoder ("Decoder worklet initialization failed:
+// SharedArrayBuffer is not defined" — the Training Room log, 2026-11-09, right after a successful auto-join). Chrome
+// grants Teams that through a Chrome-only origin trial, which Electron does not honour, so allow it app-wide: the
+// app only ever shows the Hub and the meeting hosts, in sandboxed renderers.
+app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer,SharedArrayBufferOnDesktop');
 // A plain Chrome identity. Teams and Meet turn an "Electron/…" user agent away with a blank page (first mini PC test,
 // 2026-11-09: a Teams link opened white). Nothing else in the UA changes — same Chromium, same OS.
 app.userAgentFallback = app.userAgentFallback
@@ -281,7 +286,11 @@ ipcMain.on('meeting:event', (e, ev) => {
   }
   log('meeting event', kind);
   sendState(kind);
-  if (kind === 'content' || kind === 'named' || kind === 'joined' || kind === 'audio') revealMeeting(kind);
+  if (kind === 'named' || kind === 'joined' || kind === 'audio') revealMeeting(kind);
+  else if (kind === 'content' && meeting && !meeting.revealed) {
+    const v = meeting.view;
+    setTimeout(() => { if (meeting && meeting.view === v) revealMeeting('content for 12 s'); }, 12_000);
+  }
   if (kind === 'left') {                                 // the meeting ended on its side — take the view down shortly
     const v = meeting.view;
     setTimeout(() => { if (meeting && meeting.view === v) closeMeeting('left'); }, 4_000);
