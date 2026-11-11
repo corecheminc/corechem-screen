@@ -29,7 +29,7 @@ window. This is that app for the Hub, as small as it can be.
   v0.1.6 used `element.click()` and a value setter (script events), and Teams' bot detection put the TVs in the lobby
   as suspected bots (2026-11-11). The script way is only a fallback if the app can't send input.
 - Once in the call, pop-ups nobody in the room can close ("Recording has started", tips, toasts) are closed after 8 s
-  (`meeting pop-up closed: …` in the log). A pop-up asking for a decision (explicit recording consent → Agree, Leave,
+  (`meeting pop-up closed: "Recording has started"` in the log — a known banner's name or `(other pop-up)`, never the pop-up's text: a chat toast holds the sender and a message preview). A pop-up asking for a decision (explicit recording consent → Agree, Leave,
   Join audio) is never clicked — it is logged once as `meeting pop-up needs a person: …`.
 - The view stays a 2×2 px dot until the page shows something (Teams paints nothing for 15–20 s while it "gets things
   ready"), then fills the screen; the Hub page says "Opening Teams… joining as <screen>" meanwhile. What the page says
@@ -64,7 +64,7 @@ window. This is that app for the Hub, as small as it can be.
 | `restartApp()`, `rebootPc()` | for Screens → Control (the page decides who may ask) |
 | `info() → {app, version, hub}` | shown in Screens |
 | `onLog(cb) → unsubscribe`, `logTail(bytes)` | (v2) every log line as it happens, and the file's tail at start — the page ships them to the relay's `/display/log`; Screens → Control shows the last lines |
-| `screenToken() → string`, `saveScreenToken(t) → boolean` | (v3, synchronous) the pairing token, kept in `%LOCALAPPDATA%\CoreChemScreen\screen-token` — the page prefers it over its localStorage. Why: Pause and the update task end the app with a hard kill, and localStorage written shortly before a hard kill is lost (reproduced in Electron 38: killed 1.5 s after the write → gone; 40 s → kept) — the training TV came back with a pairing code after every Pause (2026-11-11). The file is written to a temp name, fsynced and renamed. |
+| `screenToken() → string`, `saveScreenToken(t) → boolean` | (v3, synchronous) the pairing token, kept in `%LOCALAPPDATA%\CoreChemScreen\screen-token-<hub host>` (one per Hub; never in a log — don't send this file with app.log) — the page prefers it over its localStorage. Why: Pause and the update task end the app with a hard kill, and localStorage written shortly before a hard kill is lost (reproduced in Electron 38: killed 1.5 s after the write → gone; 40 s → kept) — the training TV came back with a pairing code after every Pause (2026-11-11). The file is written to a temp name, fsynced and renamed. |
 
 The Hub page keeps working in a plain browser: it feature-tests `window.coreChemScreen` and falls back to the popup.
 

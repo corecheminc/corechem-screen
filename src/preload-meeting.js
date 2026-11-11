@@ -202,6 +202,11 @@ function sayLeft(why) { if (leftSaid) return; leftSaid = true; report(`why:${why
 // job is to be closed is closed after it has been up 8 s (long enough for the room to read it). A pop-up that asks
 // for a decision — explicit recording consent (Agree), Leave / End, Join audio — is never clicked; it is logged once.
 const POPUP_SEL = '[role="alert"], [role="status"], [role="dialog"], [role="alertdialog"], [aria-live], [data-tid*="banner" i], [data-tid*="notification" i], [data-tid*="toast" i], [class*="toast" i], [class*="banner" i], [class*="notification" i], [class*="callout" i], [class*="message-bar" i], [class*="MessageBar"]';
+const KNOWN_POPUPS = /recording (has )?started|transcription (has )?started|this meeting is being (recorded|transcribed)|consent to be(ing)? recorded|live captions|copilot|you(’|')?re muted|your (camera|video) is (off|turned off)|someone (else )?is presenting|poor (network|connection)|join audio|tips?\b/i;
+function kindOf(box) {
+  const m = (box.innerText || '').replace(/\s+/g, ' ').match(KNOWN_POPUPS);
+  return m ? `"${m[0]}"` : '(other pop-up)';
+}
 const firstSeen = new WeakMap();
 const noted = new WeakSet();
 function dismissPopups(leave) {
@@ -217,7 +222,9 @@ function dismissPopups(leave) {
     if (!box || (leave && box.contains(leave))) continue;     // not a pop-up / the call bar
     if (!firstSeen.has(box)) { firstSeen.set(box, now); continue; }
     if (now - firstSeen.get(box) < 8_000) continue;
-    const what = (box.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120) || labels(b)[0] || 'pop-up';
+    // what goes to the log: a KNOWN banner's name or "(other pop-up)" — never the pop-up's own text, which for a chat
+    // toast is the sender + message preview and would land in the Hub's screen log (security review 2026-11-11)
+    const what = kindOf(box);
     const asks = [...box.querySelectorAll('button, [role="button"]')].some((o) => o !== b && visible(o) && labelled(o, NEEDS_PERSON_RE));
     if (asks) { if (!noted.has(box)) { noted.add(box); report(`needs:${what}`); } continue; }
     try { b.click(); } catch { continue; }
