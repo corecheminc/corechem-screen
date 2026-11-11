@@ -22,13 +22,31 @@ const text = (el) => ((el.innerText || el.textContent || el.value || '') + ' ' +
 const lastClick = {};
 // Join-type buttons may be visible before they work (Teams shows "Join now" greyed while "Connecting…"), so a
 // click may repeat every few seconds until the page moves on; the app de-duplicates the events.
+// Clicks and typing are REAL input sent by the app (realInput.js via 'meeting:click' / 'meeting:type-name'), not
+// element.click() / a value setter — script events read as a bot to Teams (v0.1.7). If the app can't (an old app,
+// an error) the script way is the fallback, so a join never stalls on it. 'retry' = the view was still the hidden
+// 2×2 dot or the element off-screen: the next tick measures again.
+let acting = false;
+function centreOf(el) {
+  try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch { /* fine */ }
+  const r = el.getBoundingClientRect();
+  return r.width && r.height ? { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } : null;
+}
+async function realInput(channel, el) {
+  const p = centreOf(el);
+  try { return await ipcRenderer.invoke(channel, p || { x: -1, y: -1 }); } catch { return 'error'; }
+}
 function clickEvery(el, key, ms) {
-  if (!el) return false;
+  if (!el || acting) return false;
   const now = Date.now();
   if (lastClick[key] && now - lastClick[key] < ms) return false;
   lastClick[key] = now;
-  try { el.click(); } catch { return false; }
-  report(key);
+  acting = true;
+  realInput('meeting:click', el).then((r) => {
+    if (r === 'ok') report(key);
+    else if (r === 'retry' || r === 'busy') delete lastClick[key];
+    else { try { el.click(); report(key); } catch { /* gone */ } }
+  }).finally(() => { acting = false; });
   return true;
 }
 function setValue(input, value) {
@@ -58,11 +76,15 @@ const visibleButtons = () => { try { return [...document.querySelectorAll('butto
 
 let named = false;
 function typeName(input) {
-  if (!input || named) return false;
+  if (!input || named || acting) return false;
   if ((input.value || '').trim() === screenName) { named = true; return false; }
-  setValue(input, screenName);
-  named = true;
-  report('named');
+  acting = true;
+  realInput('meeting:type-name', input).then((r) => {
+    if (r === 'retry' || r === 'busy') return;
+    if (r !== 'ok' || (input.value || '').trim() !== screenName) setValue(input, screenName);   // fallback
+    named = true;
+    report('named');
+  }).finally(() => { acting = false; });
   return true;
 }
 

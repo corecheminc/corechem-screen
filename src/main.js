@@ -17,6 +17,7 @@ const { app, BrowserWindow, WebContentsView, ipcMain, session, powerSaveBlocker 
 const path = require('node:path');
 const fs = require('node:fs');
 const { execFile } = require('node:child_process');
+const realInput = require('./realInput');
 
 const DEFAULT_HUB = 'https://app.corecheminc.com';
 const HUBS = new Set(['https://app.corecheminc.com', 'https://corecheminc-hub.vercel.app']);
@@ -291,6 +292,28 @@ ipcMain.handle('screen:reboot', (e) => {
   execFile('shutdown.exe', ['/r', '/t', '5', '/c', 'CoreChem screen: restart from the Hub'], () => undefined);
   return true;
 });
+// Real clicks / typing for the join steps (realInput.js — trusted input, not script events, so the meeting doesn't
+// take the TV for a bot). Only the meeting view may ask; it gives a point inside its own view; the only text it can
+// have typed is this meeting's display name. A view still hidden as the 2×2 dot is revealed first and the page asked
+// to try again (it re-measures on its next tick).
+let inputBusy = false;
+async function realInputAt(e, p, then) {
+  if (!fromMeeting(e) || inputBusy) return 'busy';
+  if (!meeting.revealed) { revealMeeting('join step'); return 'retry'; }
+  const x = Math.round(Number(p && p.x)), y = Math.round(Number(p && p.y));
+  const { width, height } = meeting.view.getBounds();
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= width || y >= height) return 'retry';
+  const v = meeting.view;
+  inputBusy = true;
+  try {
+    v.webContents.focus();
+    await realInput.click(v.webContents, x, y);
+    if (then && meeting && meeting.view === v) await then(v.webContents);
+    return 'ok';
+  } catch (err) { log('meeting input failed', err); return 'error'; } finally { inputBusy = false; }
+}
+ipcMain.handle('meeting:click', (e, p) => realInputAt(e, p));
+ipcMain.handle('meeting:type-name', (e, p) => realInputAt(e, p, (wc) => realInput.type(wc, meeting.name || screenName || 'Conference room')));
 ipcMain.handle('meeting:config', (e) => (fromMeeting(e) ? { name: meeting.name || screenName || 'Conference room' } : null));
 ipcMain.on('meeting:event', (e, ev) => {
   if (!fromMeeting(e)) return;

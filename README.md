@@ -24,6 +24,10 @@ window. This is that app for the Hub, as small as it can be.
   call's Leave button gone — never just a phrase somewhere on the page (v0.1.7: v0.1.6 matched "<someone> left the
   call" / a chat's "Meeting ended" banner mid-call and closed the meeting; training room 2026-11-11). The log says
   which text ended it (`meeting ended because …`).
+- The join steps use **real input** (`src/realInput.js`): the app moves the mouse to the button and clicks, and types
+  the name one key at a time, through Electron's `sendInputEvent` — the page sees trusted events, as from a person.
+  v0.1.6 used `element.click()` and a value setter (script events), and Teams' bot detection put the TVs in the lobby
+  as suspected bots (2026-11-11). The script way is only a fallback if the app can't send input.
 - Once in the call, pop-ups nobody in the room can close ("Recording has started", tips, toasts) are closed after 8 s
   (`meeting pop-up closed: …` in the log). A pop-up asking for a decision (explicit recording consent → Agree, Leave,
   Join audio) is never clicked — it is logged once as `meeting pop-up needs a person: …`.
