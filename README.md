@@ -20,6 +20,13 @@ window. This is that app for the Hub, as small as it can be.
   owns (`WebContentsView`) on top of the boards. No second window, no Teams app needed.
 - `src/preload-meeting.js` does what a person would: "Continue on this browser", types the **screen's name**, clicks
   **Join** / "Join audio by computer", and reports `left` when the meeting ends so the page tells the Hub.
+  "Ended" means the vendor's own end screen ("You left the meeting", "The meeting has ended", removed …) **and** the
+  call's Leave button gone — never just a phrase somewhere on the page (v0.1.7: v0.1.6 matched "<someone> left the
+  call" / a chat's "Meeting ended" banner mid-call and closed the meeting; training room 2026-11-11). The log says
+  which text ended it (`meeting ended because …`).
+- Once in the call, pop-ups nobody in the room can close ("Recording has started", tips, toasts) are closed after 8 s
+  (`meeting pop-up closed: …` in the log). A pop-up asking for a decision (explicit recording consent → Agree, Leave,
+  Join audio) is never clicked — it is logged once as `meeting pop-up needs a person: …`.
 - The view stays a 2×2 px dot until the page shows something (Teams paints nothing for 15–20 s while it "gets things
   ready"), then fills the screen; the Hub page says "Opening Teams… joining as <screen>" meanwhile. What the page says
   is logged every few seconds until joined.
@@ -49,7 +56,7 @@ window. This is that app for the Hub, as small as it can be.
 | `setBusy(bool)` | a share / meeting is live (postpones a quiet update) |
 | `openMeeting(session, url, name) → Promise<boolean>` | open a Teams / Zoom / Meet link in the owned view |
 | `closeMeeting() → Promise<boolean>` | take it down |
-| `onMeetingState(cb) → unsubscribe` | `{state: opened · launcher · named · joined · left · ended · error, reason, session}` |
+| `onMeetingState(cb) → unsubscribe` | `{state: opened · launcher · named · joined · incall · left · ended · error, reason, session}` (`incall` = the call's Leave button is up) |
 | `restartApp()`, `rebootPc()` | for Screens → Control (the page decides who may ask) |
 | `info() → {app, version, hub}` | shown in Screens |
 | `onLog(cb) → unsubscribe`, `logTail(bytes)` | (v2) every log line as it happens, and the file's tail at start — the page ships them to the relay's `/display/log`; Screens → Control shows the last lines |

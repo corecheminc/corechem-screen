@@ -300,9 +300,16 @@ ipcMain.on('meeting:event', (e, ev) => {
     sendState('text', kind.slice(5, 165));
     return;
   }
+  // log-only notes from the meeting page: why it decided the meeting ended, a pop-up it closed, one it left for a person
+  const note = /^(why|dismissed|needs):/.exec(kind);
+  if (note) {
+    const label = { why: 'meeting ended because', dismissed: 'meeting pop-up closed:', needs: 'meeting pop-up needs a person:' }[note[1]];
+    log(label, kind.slice(note[0].length, note[0].length + 160));
+    return;
+  }
   log('meeting event', kind);
   sendState(kind);
-  if (kind === 'named' || kind === 'joined' || kind === 'audio') revealMeeting(kind);
+  if (kind === 'named' || kind === 'joined' || kind === 'audio' || kind === 'incall') revealMeeting(kind);
   else if (kind === 'content' && meeting && !meeting.revealed) {
     const v = meeting.view;
     setTimeout(() => { if (meeting && meeting.view === v) revealMeeting('content for 12 s'); }, 12_000);
