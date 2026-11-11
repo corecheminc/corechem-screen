@@ -29,7 +29,12 @@ async function click(wc, x, y) {
 async function type(wc, text) {
   wc.selectAll();
   await wait(between(80, 150));
-  for (const ch of String(text)) {
+  for (const ch of String(text).replace(/[\u0000-\u001f\u007f]/g, '')) {
+    if (!/^[\x20-\x7e]$/.test(ch)) {                        // é, ñ, emoji …: no single key — insert it (still trusted)
+      await wc.insertText(ch);
+      await wait(between(55, 140));
+      continue;
+    }
     const k = keyName(ch);
     wc.sendInputEvent({ type: 'keyDown', keyCode: k });
     wc.sendInputEvent({ type: 'char', keyCode: ch });

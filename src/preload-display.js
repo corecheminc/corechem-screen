@@ -5,8 +5,14 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('coreChemScreen', {
-  /** bump when the shape of this API changes; the Hub page can feature-test on it (2 = onLog / logTail) */
-  version: 2,
+  /** bump when the shape of this API changes; the Hub page can feature-test on it (2 = onLog / logTail,
+   *  3 = screenToken / saveScreenToken) */
+  version: 3,
+  /** the screen's pairing token, kept by the app in a file — '' when none yet. Synchronous: the page needs it
+   *  before its first request. Why: the page's localStorage alone lost the pairing on app restarts (2026-11-11). */
+  screenToken: () => { try { return String(ipcRenderer.sendSync('screen:token-get') || ''); } catch { return ''; } },
+  /** keep this token for the next start (the page minted it or found it in localStorage) */
+  saveScreenToken: (t) => { try { return !!ipcRenderer.sendSync('screen:token-set', String(t == null ? '' : t)); } catch { return false; } },
   /** the paired screen's name — used as the display name in meetings */
   setScreenName: (name) => ipcRenderer.send('screen:name', String(name == null ? '' : name)),
   /** a share or meeting is live on the page (postpones a quiet app update) */

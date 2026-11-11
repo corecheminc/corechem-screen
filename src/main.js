@@ -101,6 +101,30 @@ function updateBusyFlag() {
 }
 setInterval(updateBusyFlag, 60_000);
 
+// %LOCALAPPDATA%\CoreChemScreen\screen-token — the screen's pairing token. The Hub page used to keep it only in its
+// localStorage, and the training-room TV came back UNPAIRED after each app restart on 2026-11-11 (19:00 and 19:06
+// UTC, re-paired by hand both times): Pause and the update task end the app with a hard Terminate, and Chromium's
+// localStorage is a LevelDB that a hard kill can leave unreadable (it is then wiped). A plain file, written to a temp
+// name, flushed and renamed, survives that. Not secret beyond this PC's user profile — the same place localStorage was.
+const TOKEN_FILE = path.join(LOG_DIR, 'screen-token');
+const TOKEN_RE = /^[0-9a-f]{64}$/;
+function readToken() {
+  try { const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); return TOKEN_RE.test(t) ? t : ''; } catch { return ''; }
+}
+function writeToken(t) {
+  if (!TOKEN_RE.test(t)) return false;
+  if (readToken() === t) return true;
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    const tmp = `${TOKEN_FILE}.tmp`;
+    const fd = fs.openSync(tmp, 'w');
+    try { fs.writeSync(fd, t); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, TOKEN_FILE);
+    log('screen token saved');
+    return true;
+  } catch (err) { log('screen token save failed', err); return false; }
+}
+
 // the last part of the log file, for the page to ship once at start (what happened before this page loaded)
 function logTail(bytes) {
   try {
@@ -228,7 +252,9 @@ async function openMeeting({ session: sess, url, name }) {
       backgroundThrottling: false, spellcheck: false,
     },
   });
-  meeting = { session: String(session || ''), url: String(url), name: String(name || screenName || ''), view, startedAt: Date.now(), revealed: false };
+  // one normalised display name: what realInput types and what the meeting page compares against
+  const displayName = String(name || screenName || '').replace(/[\u0000-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  meeting = { session: String(session || ''), url: String(url), name: displayName, view, startedAt: Date.now(), revealed: false };
   const wc = view.webContents;
   wc.setWebRTCUDPPortRange(RTC_PORTS);
   try { view.setBackgroundColor('#0b1220'); } catch { /* older Electron */ }
@@ -243,6 +269,9 @@ async function openMeeting({ session: sess, url, name }) {
   });
   wc.on('render-process-gone', (_e, d) => { log('meeting renderer gone', d.reason); if (meeting && meeting.view === view) closeMeeting('crashed'); });
   wc.on('page-title-updated', (e) => e.preventDefault());
+  wc.on('before-input-event', (_e, input) => {          // F12 still opens DevTools while the meeting view has focus
+    if (input.type === 'keyDown' && input.key === 'F12') { wc.isDevToolsOpened() ? wc.closeDevTools() : wc.openDevTools({ mode: 'detach' }); }
+  });
   // diagnostics for the log file: where the meeting page went and what it complained about
   wc.on('did-navigate', (_e, u) => log('meeting at', String(u).slice(0, 200)));
   wc.on('did-navigate-in-page', (_e, u, isMainFrame) => { if (isMainFrame) log('meeting at (in-page)', String(u).slice(0, 200)); });
@@ -280,6 +309,8 @@ function closeMeeting(reason) {
 const fromDisplay = (e) => !!win && e.sender === win.webContents && originOk(e.senderFrame ? e.senderFrame.url : '');
 const fromMeeting = (e) => !!meeting && e.sender === meeting.view.webContents;
 
+ipcMain.on('screen:token-get', (e) => { e.returnValue = fromDisplay(e) ? readToken() : ''; });
+ipcMain.on('screen:token-set', (e, t) => { e.returnValue = fromDisplay(e) ? writeToken(String(t || '')) : false; });
 ipcMain.handle('screen:info', (e) => (fromDisplay(e) ? { app: 'corechem-screen', version: app.getVersion(), hub: cfg.hub } : null));
 ipcMain.handle('screen:log-tail', (e, bytes) => (fromDisplay(e) ? logTail(bytes) : ''));
 ipcMain.on('screen:name', (e, name) => { if (fromDisplay(e)) screenName = String(name || '').slice(0, 80); });
@@ -313,8 +344,8 @@ async function realInputAt(e, p, then) {
   } catch (err) { log('meeting input failed', err); return 'error'; } finally { inputBusy = false; }
 }
 ipcMain.handle('meeting:click', (e, p) => realInputAt(e, p));
-ipcMain.handle('meeting:type-name', (e, p) => realInputAt(e, p, (wc) => realInput.type(wc, meeting.name || screenName || 'Conference room')));
-ipcMain.handle('meeting:config', (e) => (fromMeeting(e) ? { name: meeting.name || screenName || 'Conference room' } : null));
+ipcMain.handle('meeting:type-name', (e, p) => realInputAt(e, p, (wc) => realInput.type(wc, meeting.name || 'Conference room')));
+ipcMain.handle('meeting:config', (e) => (fromMeeting(e) ? { name: meeting.name || 'Conference room' } : null));
 ipcMain.on('meeting:event', (e, ev) => {
   if (!fromMeeting(e)) return;
   const kind = String(ev || '');

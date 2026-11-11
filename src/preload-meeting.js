@@ -36,16 +36,22 @@ async function realInput(channel, el) {
   const p = centreOf(el);
   try { return await ipcRenderer.invoke(channel, p || { x: -1, y: -1 }); } catch { return 'error'; }
 }
+const retries = {};
+const MAX_RETRIES = 8;                     // ~6 s of 'retry' (element off-screen / zero-size) → the script way
+function scriptClick(el, key) { try { el.click(); report(key); } catch { /* gone */ } }
 function clickEvery(el, key, ms) {
   if (!el || acting) return false;
   const now = Date.now();
   if (lastClick[key] && now - lastClick[key] < ms) return false;
   lastClick[key] = now;
+  // "Continue on this browser" stays a script click: real input needs the view full-size, and revealing it on the
+  // launcher would put a white Teams page over the boards for 15–20 s (v0.1.5). Teams checks the join, not this.
+  if (key === 'launcher' || (retries[key] || 0) >= MAX_RETRIES) { scriptClick(el, key); return true; }
   acting = true;
   realInput('meeting:click', el).then((r) => {
-    if (r === 'ok') report(key);
-    else if (r === 'retry' || r === 'busy') delete lastClick[key];
-    else { try { el.click(); report(key); } catch { /* gone */ } }
+    if (r === 'ok') { retries[key] = 0; report(key); }
+    else if (r === 'retry' || r === 'busy') { retries[key] = (retries[key] || 0) + 1; delete lastClick[key]; }
+    else scriptClick(el, key);
   }).finally(() => { acting = false; });
   return true;
 }
@@ -78,10 +84,12 @@ let named = false;
 function typeName(input) {
   if (!input || named || acting) return false;
   if ((input.value || '').trim() === screenName) { named = true; return false; }
+  const viaScript = () => { setValue(input, screenName); named = true; report('named'); };
+  if ((retries.named || 0) >= MAX_RETRIES) { viaScript(); return true; }
   acting = true;
   realInput('meeting:type-name', input).then((r) => {
-    if (r === 'retry' || r === 'busy') return;
-    if (r !== 'ok' || (input.value || '').trim() !== screenName) setValue(input, screenName);   // fallback
+    if (r === 'retry' || r === 'busy') { retries.named = (retries.named || 0) + 1; return; }
+    if (r !== 'ok' || (input.value || '').trim() !== screenName) { viaScript(); return; }   // fallback
     named = true;
     report('named');
   }).finally(() => { acting = false; });
@@ -94,7 +102,10 @@ const AUDIO_RE = /join audio by computer|join with computer audio|computer audio
 // "<someone> left the call" or a chat's "Meeting ended: 21m" banner, which the old pattern matched mid-meeting and
 // so closed the meeting on the TV (Training room, 2026-11-11: 12 Teams joins in 30 min, each "left" after 15 s–5 min).
 // And it only counts once the call's Leave button is gone (leaveButton() below) — a live call always shows one.
-const ENDED_RE = /you(’|')?ve left the (meeting|call)|you left the (meeting|call)|you(’|')?ve been removed|you have been removed|removed you from (the|this) (meeting|call)|(the|this) (meeting|call) has (been )?ended|the host (has )?ended (the|this) meeting|ended the meeting for everyone|meeting (was )?ended by (the )?host|thanks for joining|how was the (audio and video|call quality)|rate (the|your) call quality/i;
+const ENDED_RE = /you(’|')?ve left the (meeting|call)|you left the (meeting|call)|you(’|')?ve been removed|you have been removed|removed you from (the|this) (meeting|call)|(the|this) (meeting|call) has (been )?ended|the host (has )?ended (the|this) meeting|ended the meeting for everyone|meeting (was )?ended by (the )?host/i;
+// Said on end screens but also typed in chat / spoken in captions — only counted when the page is short (an end
+// screen), never over a whole meeting page.
+const ENDED_WEAK_RE = /thanks for joining|how was the (audio and video|call quality)|rate (the|your) call quality/i;
 // The call's Leave / Hang up button — present for the whole call (Teams top bar, Zoom footer, Meet bottom bar).
 const LEAVE_LABEL_RE = /^(leave|leave (call|meeting)|hang ?up|end call)\b/i;
 // A pop-up's "close it" button. Anything else in a pop-up (Agree, Accept, Leave, Join audio …) is left for a person.
@@ -162,7 +173,8 @@ function tick() {
   if (leave && !inCall) { inCall = true; report('incall'); }
   // ended = the vendor's end screen is up AND the Leave button is gone, two ticks in a row (a re-render can drop
   // the button for a frame)
-  const m = leave ? null : t.slice(0, 20000).match(ENDED_RE);
+  // an "ended by host" / "you've been removed" pop-up is decisive even if the call bar is still drawn under it
+  const m = endedDialog() || (leave ? null : (t.slice(0, 20000).match(ENDED_RE) || (t.length < 1500 ? t.match(ENDED_WEAK_RE) : null)));
   if (m) { endedTicks += 1; if (endedTicks >= 2) sayLeft(`end screen: "${m[0]}"`); } else endedTicks = 0;
   if (inCall) dismissPopups(leave);
   // what the page says, every 5 s while it changes (until the join steps are done) — for the app's log
@@ -171,6 +183,16 @@ function tick() {
     lastText = snippet; lastTextAt = Date.now();
     report(`text:${snippet || '(empty page)'}`);
   }
+}
+function endedDialog() {
+  try {
+    for (const d of document.querySelectorAll('[role="dialog"], [role="alertdialog"]')) {
+      if (!visible(d)) continue;
+      const m = (d.innerText || '').replace(/\s+/g, ' ').match(ENDED_RE);
+      if (m) return m;
+    }
+  } catch { /* page mid-render */ }
+  return null;
 }
 function sayLeft(why) { if (leftSaid) return; leftSaid = true; report(`why:${why}`); report('left'); }
 
@@ -188,8 +210,11 @@ function dismissPopups(leave) {
   const now = Date.now();
   for (const b of buttons) {
     if (!labelled(b, DISMISS_RE)) continue;
-    const box = b.closest(POPUP_SEL);
-    if (!box || box === document.body || (leave && box.contains(leave))) continue;     // not a pop-up / the call bar
+    // the OUTERMOST pop-up around the button: a dialog's header / close wrapper can match the selector on its own,
+    // and "Join audio by computer" or "Agree" sit elsewhere in the same dialog (Zoom's audio dialog must never close)
+    let box = null;
+    for (let a = b.parentElement; a && a !== document.body; a = a.parentElement) { try { if (a.matches(POPUP_SEL)) box = a; } catch { break; } }
+    if (!box || (leave && box.contains(leave))) continue;     // not a pop-up / the call bar
     if (!firstSeen.has(box)) { firstSeen.set(box, now); continue; }
     if (now - firstSeen.get(box) < 8_000) continue;
     const what = (box.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120) || labels(b)[0] || 'pop-up';
