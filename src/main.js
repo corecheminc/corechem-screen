@@ -17,6 +17,7 @@ const { app, BrowserWindow, WebContentsView, ipcMain, session, powerSaveBlocker 
 const path = require('node:path');
 const fs = require('node:fs');
 const { execFile } = require('node:child_process');
+const realInput = require('./realInput');
 
 const DEFAULT_HUB = 'https://app.corecheminc.com';
 const HUBS = new Set(['https://app.corecheminc.com', 'https://corecheminc-hub.vercel.app']);
@@ -76,7 +77,7 @@ let loadFails = 0;
 const LOG_DIR = path.join(process.env.LOCALAPPDATA || process.env.TEMP || '.', 'CoreChemScreen');
 const LOG_FILE = path.join(LOG_DIR, 'app.log');
 function log(...a) {
-  const line = `${new Date().toISOString()} ${a.map((x) => (x instanceof Error ? x.message : String(x))).join(' ')}`;
+  const line = `${new Date().toISOString()} ${a.map((x) => (x instanceof Error ? x.message : String(x))).join(' ')}`.replace(/[\r\n]+/g, ' ');
   console.log(line);
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -99,6 +100,34 @@ function updateBusyFlag() {
   } catch { /* fine */ }
 }
 setInterval(updateBusyFlag, 60_000);
+
+// %LOCALAPPDATA%\CoreChemScreen\screen-token — the screen's pairing token. The Hub page used to keep it only in its
+// localStorage, and the training-room TV came back UNPAIRED after each app restart on 2026-11-11 (19:00 and 19:06
+// UTC, re-paired by hand both times): Pause and the update task end the app with a hard Terminate, and Chromium's
+// localStorage is a LevelDB that a hard kill can leave unreadable (it is then wiped). A plain file, written to a temp
+// name, flushed and renamed, survives that. Not secret beyond this PC's user profile — the same place localStorage was.
+// one file per Hub (test / production), like localStorage was per origin; no LOCALAPPDATA → don't persist at all
+const TOKEN_FILE = process.env.LOCALAPPDATA
+  ? path.join(process.env.LOCALAPPDATA, 'CoreChemScreen', `screen-token-${new URL(cfg.hub).host}`)
+  : null;
+const TOKEN_RE = /^[0-9a-f]{64}$/;
+function readToken() {
+  if (!TOKEN_FILE) return '';
+  try { const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); return TOKEN_RE.test(t) ? t : ''; } catch { return ''; }
+}
+function writeToken(t) {
+  if (!TOKEN_RE.test(t) || !TOKEN_FILE) return false;
+  if (readToken() === t) return true;
+  try {
+    fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
+    const tmp = `${TOKEN_FILE}.tmp`;
+    const fd = fs.openSync(tmp, 'w');
+    try { fs.writeSync(fd, t); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, TOKEN_FILE);
+    log('screen token saved');
+    return true;
+  } catch (err) { log('screen token save failed', err); return false; }
+}
 
 // the last part of the log file, for the page to ship once at start (what happened before this page loaded)
 function logTail(bytes) {
@@ -160,6 +189,7 @@ function createWindow() {
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => { if (!originOk(url) || !url.startsWith(cfg.hub)) e.preventDefault(); });
+  win.webContents.on('will-redirect', (e, url) => { if (!url.startsWith(cfg.hub)) { log('display redirect refused', String(url).slice(0, 80)); e.preventDefault(); } });
   win.webContents.on('did-fail-load', (_e, code, _desc, url, isMainFrame) => {
     if (!isMainFrame || code === -3 /* aborted by a newer load */) return;
     if (!String(url).startsWith('file:')) win.loadFile(path.join(__dirname, 'offline.html')).catch(() => undefined);
@@ -203,7 +233,11 @@ function sendState(state, reason, sess) {
 let meetingSessionReady = false;
 async function freshMeetingSession() {
   const ses = session.fromPartition(MEETING_PARTITION);
-  if (!meetingSessionReady) { setupSession(ses); meetingSessionReady = true; }
+  if (!meetingSessionReady) {
+    setupSession(ses);
+    ses.on('will-download', (_e, item) => { log('meeting download refused', item.getFilename()); item.cancel(); });
+    meetingSessionReady = true;
+  }
   try { await ses.clearStorageData(); } catch (err) { log('meeting session clear failed', err); }
   try { await ses.clearCache(); } catch { /* fine */ }
   return ses;
@@ -227,7 +261,9 @@ async function openMeeting({ session: sess, url, name }) {
       backgroundThrottling: false, spellcheck: false,
     },
   });
-  meeting = { session: String(session || ''), url: String(url), name: String(name || screenName || ''), view, startedAt: Date.now(), revealed: false };
+  // one normalised display name: what realInput types and what the meeting page compares against
+  const displayName = String(name || screenName || '').replace(/[\u0000-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  meeting = { session: String(session || ''), url: String(url), name: displayName, view, startedAt: Date.now(), revealed: false };
   const wc = view.webContents;
   wc.setWebRTCUDPPortRange(RTC_PORTS);
   try { view.setBackgroundColor('#0b1220'); } catch { /* older Electron */ }
@@ -242,11 +278,17 @@ async function openMeeting({ session: sess, url, name }) {
   });
   wc.on('render-process-gone', (_e, d) => { log('meeting renderer gone', d.reason); if (meeting && meeting.view === view) closeMeeting('crashed'); });
   wc.on('page-title-updated', (e) => e.preventDefault());
+  wc.on('before-input-event', (_e, input) => {          // F12 still opens DevTools while the meeting view has focus
+    if (input.type === 'keyDown' && input.key === 'F12') { wc.isDevToolsOpened() ? wc.closeDevTools() : wc.openDevTools({ mode: 'detach' }); }
+  });
   // diagnostics for the log file: where the meeting page went and what it complained about
   wc.on('did-navigate', (_e, u) => log('meeting at', String(u).slice(0, 200)));
   wc.on('did-navigate-in-page', (_e, u, isMainFrame) => { if (isMainFrame) log('meeting at (in-page)', String(u).slice(0, 200)); });
   wc.on('did-finish-load', () => log('meeting loaded', wc.getURL().slice(0, 200), '| title:', wc.getTitle().slice(0, 80)));
-  wc.on('will-redirect', (_e, u) => log('meeting redirect', String(u).slice(0, 200)));
+  wc.on('will-redirect', (e, u) => {
+    if (!MEETING_NAV.test(u)) { log('meeting redirect refused', String(u).slice(0, 80)); e.preventDefault(); return; }
+    log('meeting redirect', String(u).slice(0, 200));
+  });
   wc.on('preload-error', (_e, p, err) => log('meeting preload error', p, err));
   wc.on('console-message', (e, ...rest) => {           // Electron ≥ 35 passes one event object; older ones (level, message, …)
     const d = e && typeof e === 'object' && 'message' in e ? e : { level: rest[0], message: rest[1] };
@@ -276,9 +318,16 @@ function closeMeeting(reason) {
 }
 
 // ---------------------------------------------------------------- IPC (only from the Hub page / the meeting view)
-const fromDisplay = (e) => !!win && e.sender === win.webContents && originOk(e.senderFrame ? e.senderFrame.url : '');
+// the Hub page's MAIN frame on this app's own Hub — not a subframe, not a meeting host (security review 2026-11-11)
+const HUB_ORIGIN = new URL(cfg.hub).origin;
+const fromDisplay = (e) => {
+  if (!win || e.sender !== win.webContents || !e.senderFrame || e.senderFrame !== win.webContents.mainFrame) return false;
+  try { return new URL(e.senderFrame.url).origin === HUB_ORIGIN; } catch { return false; }
+};
 const fromMeeting = (e) => !!meeting && e.sender === meeting.view.webContents;
 
+ipcMain.on('screen:token-get', (e) => { e.returnValue = fromDisplay(e) ? readToken() : ''; });
+ipcMain.on('screen:token-set', (e, t) => { e.returnValue = fromDisplay(e) ? writeToken(String(t || '')) : false; });
 ipcMain.handle('screen:info', (e) => (fromDisplay(e) ? { app: 'corechem-screen', version: app.getVersion(), hub: cfg.hub } : null));
 ipcMain.handle('screen:log-tail', (e, bytes) => (fromDisplay(e) ? logTail(bytes) : ''));
 ipcMain.on('screen:name', (e, name) => { if (fromDisplay(e)) screenName = String(name || '').slice(0, 80); });
@@ -291,7 +340,31 @@ ipcMain.handle('screen:reboot', (e) => {
   execFile('shutdown.exe', ['/r', '/t', '5', '/c', 'CoreChem screen: restart from the Hub'], () => undefined);
   return true;
 });
-ipcMain.handle('meeting:config', (e) => (fromMeeting(e) ? { name: meeting.name || screenName || 'Conference room' } : null));
+// Real clicks / typing for the join steps (realInput.js — trusted input, not script events, so the meeting doesn't
+// take the TV for a bot). Only the meeting view may ask; it gives a point inside its own view; the only text it can
+// have typed is this meeting's display name. A view still hidden as the 2×2 dot is revealed first and the page asked
+// to try again (it re-measures on its next tick).
+let inputBusy = false;
+async function realInputAt(e, p, then) {
+  if (!fromMeeting(e)) return null;
+  if (inputBusy) return 'busy';
+  if (!MEETING_NAV.test(meeting.view.webContents.getURL())) return 'error';      // only into a meeting site
+  if (!meeting.revealed) { revealMeeting('join step'); return 'retry'; }
+  const x = Math.round(Number(p && p.x)), y = Math.round(Number(p && p.y));
+  const { width, height } = meeting.view.getBounds();
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= width || y >= height) return 'retry';
+  const v = meeting.view;
+  inputBusy = true;
+  try {
+    v.webContents.focus();
+    await realInput.click(v.webContents, x, y);
+    if (then && meeting && meeting.view === v) await then(v.webContents);
+    return 'ok';
+  } catch (err) { log('meeting input failed', err); return 'error'; } finally { inputBusy = false; }
+}
+ipcMain.handle('meeting:click', (e, p) => realInputAt(e, p));
+ipcMain.handle('meeting:type-name', (e, p) => realInputAt(e, p, (wc) => realInput.type(wc, meeting.name || 'Conference room')));
+ipcMain.handle('meeting:config', (e) => (fromMeeting(e) ? { name: meeting.name || 'Conference room' } : null));
 ipcMain.on('meeting:event', (e, ev) => {
   if (!fromMeeting(e)) return;
   const kind = String(ev || '');
@@ -300,9 +373,16 @@ ipcMain.on('meeting:event', (e, ev) => {
     sendState('text', kind.slice(5, 165));
     return;
   }
+  // log-only notes from the meeting page: why it decided the meeting ended, a pop-up it closed, one it left for a person
+  const note = /^(why|dismissed|needs):/.exec(kind);
+  if (note) {
+    const label = { why: 'meeting ended because', dismissed: 'meeting pop-up closed:', needs: 'meeting pop-up needs a person:' }[note[1]];
+    log(label, kind.slice(note[0].length, note[0].length + 160));
+    return;
+  }
   log('meeting event', kind);
   sendState(kind);
-  if (kind === 'named' || kind === 'joined' || kind === 'audio') revealMeeting(kind);
+  if (kind === 'named' || kind === 'joined' || kind === 'audio' || kind === 'incall') revealMeeting(kind);
   else if (kind === 'content' && meeting && !meeting.revealed) {
     const v = meeting.view;
     setTimeout(() => { if (meeting && meeting.view === v) revealMeeting('content for 12 s'); }, 12_000);
