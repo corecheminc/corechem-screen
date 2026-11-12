@@ -175,6 +175,37 @@ jobs:
           if ((Get-FileHash $updater).Hash -ne $before) { throw 'updater touched in a user-owned folder' }
           'OK: refused'
 
+      - name: The setup script's one-time lock-down (test/setup-lock-block.ps1 = a verbatim copy from the Hub setup)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Say($m, $c = 'Gray') { Write-Host $m }
+          function Check($Root, $what) {
+            $acl = Get-Acl -LiteralPath $Root
+            if ((Get-Item -LiteralPath $Root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$what : still a link" }
+            if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') { throw "$what : owner" }
+            if (-not $acl.AreAccessRulesProtected) { throw "$what : inherits" }
+            $bad = $acl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin 'S-1-5-18', 'S-1-5-32-544' -and
+              ($_.FileSystemRights -band ([Security.AccessControl.FileSystemRights]'Write, Delete, ChangePermissions, TakeOwnership')) }
+            if ($bad) { throw "$what : others can write" }
+            "OK: $what"
+          }
+          $Root = 'C:\ProgramData\CCS-setup-test'
+          . .\test\setup-lock-block.ps1; Check $Root 'new folder'
+          'cfg' | Set-Content "$Root\config.json"
+          cmd /c mklink /J "$Root\x" C:\locked-target | Out-Null
+          $tb = (Get-Acl C:\locked-target).Sddl
+          . .\test\setup-lock-block.ps1; Check $Root 'existing folder with a planted link'
+          if (Test-Path "$Root\x") { throw 'planted link kept' }
+          if ((Get-Acl C:\locked-target).Sddl -ne $tb) { throw 'link target changed' }
+          if (-not (Test-Path "$Root\config.json")) { throw 'a legitimate file was removed' }
+          cmd /c rd /s /q $Root
+          cmd /c mklink /J $Root C:\locked-target | Out-Null
+          . .\test\setup-lock-block.ps1; Check $Root 'folder that was a link'
+          if ((Get-Acl C:\locked-target).Sddl -ne $tb) { throw 'link target changed' }
+          if (-not (Test-Path C:\locked-target\f.txt)) { throw 'link target emptied' }
+          cmd /c rd /s /q $Root
+
       - name: post-install fixes an idle task's limit, and creates a missing task
         shell: powershell
         run: |
