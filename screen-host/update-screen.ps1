@@ -16,6 +16,9 @@ try {
   if (-not $cfg.app) { exit 0 }
   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
   $r = Invoke-WebRequest ($Latest + 'latest.yml') -UseBasicParsing -TimeoutSec 30
+  # GitHub serves release assets as application/octet-stream, and Windows PowerShell 5.1 then returns .Content as
+  # BYTES - the setup-era updater matched "version:" against bytes, never matched, and exited silently every 15 min
+  # on every TV (found 2026-11-12: no TV had ever updated itself). Always decode.
   $y = $r.Content
   if ($y -is [byte[]]) { $y = [Text.Encoding]::UTF8.GetString($y) }
 

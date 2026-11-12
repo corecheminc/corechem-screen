@@ -1,10 +1,12 @@
 # End-to-end install test on a real Windows machine, without publishing anything:
 #  1. a "TV PC" as it is in the field: app 0.1.7 (the real released installer), the setup script's config.json, and
-#     the OLD updater (test/old-update-screen.ps1 = what the TVs ran on 2026-11-11: Invoke-WebRequest, 20-min task)
-#     registered as the SYSTEM task "CoreChem Screen update";
-#  2. this build as a web installer whose package comes from a local server instead of the GitHub release;
-#  3. the OLD updater, run by the task as SYSTEM, must install this build, and the install's post-install step must
-#     replace the updater with screen-host/update-screen.ps1;
+#     the OLD updater (test/old-update-screen.ps1 = what the TVs ran on 2026-11-11) registered as the SYSTEM task
+#     "CoreChem Screen update"; this build is served from a local server the way GitHub serves a release
+#     (application/octet-stream);
+#  2. the OLD updater exits without a word - the 2026-11-11 bug: PowerShell 5.1 hands an octet-stream latest.yml
+#     back as BYTES, the version match fails, exit 0. No TV ever updated itself; this step keeps that on record;
+#  3. the updater a setup run writes (screen-host/update-screen.ps1) installs this build as SYSTEM, and the install's
+#     post-install step puts the release's own copy of the updater in place;
 #  4. post-install creates the task when it is missing / sets its 60-min limit when it is idle;
 #  5. the new updater puts a wrong clock right (from GitHub's Date header).
 name: Install test (Windows)
@@ -28,15 +30,17 @@ jobs:
           node-version: 22
       - run: npm install --no-audit --no-fund
       - run: npm run check
-      - name: Build the web installer (package served locally)
+      - name: Build the installer
         shell: pwsh
-        run: npx electron-builder --win --publish never "-c.nsisWeb.appPackageUrl=$env:PKG"
-      - name: Serve the build like a GitHub release (latest.yml, CoreChemScreen-Setup.exe, the .nsis.7z)
+        run: npx electron-builder --win --publish never
+      - name: Serve the build like a GitHub release (latest.yml + CoreChemScreen-Setup.exe as octet-stream)
         shell: pwsh
         run: |
-          Start-Process python -ArgumentList '-m','http.server','8765','--bind','127.0.0.1','--directory','dist\nsis-web' -WindowStyle Hidden
+          Start-Process python -ArgumentList '-m','http.server','8765','--bind','127.0.0.1','--directory','dist' -WindowStyle Hidden
           Start-Sleep 3
-          (Invoke-WebRequest "$($env:PKG)latest.yml" -UseBasicParsing).Content
+          $r = Invoke-WebRequest "$($env:PKG)latest.yml" -UseBasicParsing
+          "Content-Type: $($r.Headers['Content-Type'])"
+          [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray())
 
       - name: A TV PC as in the field - app 0.1.7, config.json, the OLD updater as the SYSTEM task
         shell: powershell
@@ -58,9 +62,22 @@ jobs:
           Register-ScheduledTask -TaskName $env:TASK -Action $a -Trigger $tr -Principal $pr -Settings $s -Force | Out-Null
           "task limit: $((Get-ScheduledTask $env:TASK).Settings.ExecutionTimeLimit)"
 
-      - name: The OLD updater (SYSTEM task) installs this build
+      - name: The OLD updater exits silently (the 2026-11-11 bug, on record)
         shell: powershell
         run: |
+          Start-ScheduledTask -TaskName $env:TASK
+          $t0 = Get-Date
+          do { Start-Sleep 5; $st = (Get-ScheduledTask $env:TASK).State } while ($st -eq 'Running' -and ((Get-Date) - $t0).TotalMinutes -lt 25)
+          "old updater finished in $([int]((Get-Date) - $t0).TotalSeconds) s"
+          $v = (Get-Item "$env:ProgramFiles\CoreChem Screen\CoreChem Screen.exe").VersionInfo.ProductVersion
+          if (-not $v.StartsWith('0.1.7')) { throw "the old updater installed $v - the bug this records is gone?" }
+          "as on the TVs: still $v, update.log present: $(Test-Path "$env:ROOT\update.log")"
+
+      - name: The updater a setup run writes installs this build (SYSTEM task), and the release replaces it
+        shell: powershell
+        run: |
+          (Get-Content screen-host\update-screen.ps1 -Raw).Replace('https://github.com/corecheminc/corechem-screen/releases/latest/download/', $env:PKG) |
+            Set-Content "$env:ROOT\update-screen.ps1" -Encoding ASCII
           Start-ScheduledTask -TaskName $env:TASK
           $t0 = Get-Date
           do { Start-Sleep 10; $st = (Get-ScheduledTask $env:TASK).State } while ($st -eq 'Running' -and ((Get-Date) - $t0).TotalMinutes -lt 25)
@@ -71,8 +88,10 @@ jobs:
           if (-not $v.StartsWith($want)) { throw "installed $v, expected $want" }
           if (-not (Test-Path "$env:ProgramFiles\CoreChem Screen\resources\screen-host\post-install.ps1")) { throw 'screen-host not installed' }
           if ((Get-FileHash "$env:ROOT\update-screen.ps1").Hash -ne (Get-FileHash screen-host\update-screen.ps1).Hash) { throw 'updater script was NOT replaced by the release copy' }
-          if (-not (Select-String "$env:ROOT\update.log" -Pattern 'post-install: updater script refreshed' -Quiet)) { throw 'no post-install line in update.log' }
-          "OK: $v installed by the old updater; updater script replaced"
+          foreach ($pat in 'downloaded .* MB', 'installer exit 0', 'post-install: updater script refreshed') {
+            if (-not (Select-String "$env:ROOT\update.log" -Pattern $pat -Quiet)) { throw "update.log has no '$pat'" }
+          }
+          "OK: $v installed by the SYSTEM task; the release's updater is in place"
 
       - name: post-install fixes an idle task's limit, and creates a missing task
         shell: powershell

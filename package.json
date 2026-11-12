@@ -27,8 +27,8 @@
     "directories": { "output": "dist" },
     "files": ["src/**/*", "package.json"],
     "extraResources": [{ "from": "screen-host", "to": "screen-host", "filter": ["*.ps1"] }],
-    "win": { "target": [{ "target": "nsis-web", "arch": ["x64"] }] },
-    "nsisWeb": {
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
+    "nsis": {
       "oneClick": true,
       "perMachine": true,
       "allowElevation": true,

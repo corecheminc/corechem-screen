@@ -57,8 +57,9 @@ window. This is that app for the Hub, as small as it can be.
   missing, and sets its 60-min limit. So a broken updater is fixed by releasing the app. The updater also sets a
   wrong PC clock from GitHub's `Date` header, and the app forwards new `update.log` lines into its own log, so they
   show up in the Hub (Screens → Control → Log, `updater:`). Why: 0.1.7 (2026-11-11) never installed itself on any TV.
-  The setup-era updater downloaded the 100 MB installer with PowerShell 5.1's slow `Invoke-WebRequest`, inside a
-  20-min task limit, and fixing that meant re-running setup at every TV.
+  The setup-era updater read `latest.yml`, which GitHub serves as `application/octet-stream`, so PowerShell 5.1 handed
+  it back as bytes. The version match then failed and the updater quit silently every 15 minutes, and fixing it meant
+  re-running setup at every TV.
 
 ## Page API (`window.coreChemScreen`, version 1)
 
@@ -88,12 +89,11 @@ purpose: the mini PCs download the installer with no login, `electron-updater` c
 publishes with GitHub's own `GITHUB_TOKEN` — no long-lived access token anywhere. There is nothing secret in here:
 the Hub's public addresses, the meeting hosts, and the join-screen automation.
 
-`.github/workflows/release.yml` builds a **web installer** (`nsis-web`, since 0.1.8) on `windows-latest`. Bump
-`version` in `package.json`, commit, and push a tag `v<version>`. The release then gets `CoreChemScreen-Setup.exe`
-(a ~1 MB stub), `corechem-screen-<version>-x64.nsis.7z` (the app, which the stub downloads from the release) and
-`latest.yml`. A small installer means any updater, even the old slow one, fetches it in seconds.
-`.github/workflows/test-install.yml` (every PR) runs the whole path on a Windows runner: a 0.1.7 PC with the OLD
-updater as a SYSTEM task installs the build, gets the new updater, and has its clock corrected. The Hub's setup
+`.github/workflows/release.yml` builds the NSIS installer on `windows-latest`. Bump `version` in `package.json`,
+commit, push a tag `v<version>` → `CoreChemScreen-Setup.exe` + `latest.yml` appear on the release.
+`.github/workflows/test-install.yml` (every PR) runs the update path on a Windows runner. It sets up a 0.1.7 PC whose
+SYSTEM task has the setup's updater, then checks that the task installs the build, that the release's updater
+replaces the setup's copy, that a missing task gets re-created, and that a wrong clock is corrected. The Hub's setup
 script installs from `https://github.com/corecheminc/corechem-screen/releases/latest/download/CoreChemScreen-Setup.exe`
 (silent `/S`, per machine). A manual run of the workflow builds without publishing (workflow artifact).
 

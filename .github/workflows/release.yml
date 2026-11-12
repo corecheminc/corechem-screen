@@ -64,9 +64,7 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $names = gh release view $tag --json assets --jq '.assets[].name'
-          # web installer (since 0.1.8): the ~1 MB CoreChemScreen-Setup.exe fetches the app package (.nsis.7z) itself
-          $v = (Get-Content package.json | ConvertFrom-Json).version
-          foreach ($need in @('CoreChemScreen-Setup.exe', 'latest.yml', "corechem-screen-$v-x64.nsis.7z")) {
+          foreach ($need in @('CoreChemScreen-Setup.exe', 'latest.yml')) {
             if ($names -notcontains $need) { throw "release is missing $need (assets: $($names -join ', '))" }
           }
           gh release edit $tag --draft=false --latest
@@ -74,7 +72,6 @@ jobs:
         with:
           name: CoreChemScreen-Setup
           path: |
-            dist/nsis-web/*.exe
-            dist/nsis-web/*.7z
-            dist/nsis-web/latest.yml
+            dist/*.exe
+            dist/latest.yml
           if-no-files-found: error
