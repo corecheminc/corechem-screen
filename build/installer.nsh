@@ -5,7 +5,7 @@
 !macro customInstall
   StrCpy $0 "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
   IfFileExists $0 +2 0
-    StrCpy $0 "powershell.exe"
+    StrCpy $0 "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"   ; full path: a bare name could resolve to a planted exe
   IfFileExists "$INSTDIR\resources\screen-host\post-install.ps1" 0 +2
     nsExec::ExecToLog '"$0" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\resources\screen-host\post-install.ps1"'
 !macroend

@@ -9,6 +9,26 @@ $logFile = Join-Path $Root 'update.log'
 function L($m) { try { Add-Content $logFile ("{0} post-install: {1}" -f (Get-Date -Format s), $m) } catch { } }
 if (-not (Test-Path (Join-Path $Root 'config.json'))) { exit 0 }
 
+# 0. lock the folder down BEFORE trusting anything in it (security review 2026-11-12): ProgramData lets any user
+#    create files and folders, and SYSTEM runs update-screen.ps1 from here. Owner Administrators, SYSTEM +
+#    Administrators full control, Users read/execute only, every child reset to inherit that. Nothing that runs as
+#    the signed-in user writes here (pause flag, app log, token live in %LOCALAPPDATA%), so read is enough.
+$icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+try {
+  $owner = (Get-Acl $Root).GetOwner([Security.Principal.SecurityIdentifier]).Value
+  if ($owner -notin 'S-1-5-18', 'S-1-5-32-544') { L "folder was owned by $owner - taking it over" }
+  & $icacls $Root /setowner '*S-1-5-32-544' /T /C /Q | Out-Null
+  & $icacls $Root /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /C /Q | Out-Null
+  & $icacls (Join-Path $Root '*') /reset /T /C /Q | Out-Null
+  Remove-Item (Join-Path $Root 'CoreChemScreen-Setup.exe') -Force -ErrorAction SilentlyContinue   # setup-era download spot
+  $w = (Get-Acl $Root).Access | Where-Object {
+    $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin 'S-1-5-18', 'S-1-5-32-544' -and
+    ($_.FileSystemRights -band ([Security.AccessControl.FileSystemRights]'Write, Delete, ChangePermissions, TakeOwnership'))
+  }
+  if ($w) { L 'folder still writable by others after lock-down - not touching the updater or its task'; exit 0 }
+  L 'folder locked down (SYSTEM + Administrators write, Users read)'
+} catch { L "folder lock-down failed: $($_.Exception.Message) - not touching the updater or its task"; exit 0 }
+
 # 1. the updater script from this release
 $updater = Join-Path $Root 'update-screen.ps1'
 try {
