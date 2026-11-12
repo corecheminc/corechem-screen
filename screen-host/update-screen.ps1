@@ -25,10 +25,12 @@ try {
 
   # The PC clock. The Downstairs Conference Room PC ran 15 h fast in UTC (2026-11-11), so its 03:30 nightly restart
   # came at lunchtime. GitHub's Date header (over TLS) is a good enough clock: correct anything more than 2 min off.
+  # From github.com itself - a page made per request. NOT from the release download: that comes off a CDN, and adding
+  # its Age header made the test PC 35 min fast (2026-11-12 CI run), so no cache arithmetic at all.
   try {
-    $now = [DateTime]::ParseExact([string]$r.Headers['Date'], 'r', [Globalization.CultureInfo]::InvariantCulture,
+    $g = Invoke-WebRequest 'https://github.com/' -Method Head -UseBasicParsing -TimeoutSec 30
+    $now = [DateTime]::ParseExact([string]$g.Headers['Date'], 'r', [Globalization.CultureInfo]::InvariantCulture,
       [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
-    $age = 0; if ([int]::TryParse([string]$r.Headers['Age'], [ref]$age)) { $now = $now.AddSeconds($age) }   # a cached reply
     $off = ((Get-Date).ToUniversalTime() - $now).TotalSeconds
     if ([Math]::Abs($off) -gt 120) {
       Set-Date -Date $now.ToLocalTime() | Out-Null
