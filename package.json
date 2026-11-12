@@ -1,7 +1,7 @@
 {
   "name": "corechem-screen",
   "productName": "CoreChem Screen",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "CoreChem Hub office-screen app: shows the Hub's TV page full-screen and hosts Teams / Zoom / Meet meetings inside it, joined under the screen's name.",
   "main": "src/main.js",
   "private": true,
@@ -26,15 +26,17 @@
     "copyright": "CoreChem Inc.",
     "directories": { "output": "dist" },
     "files": ["src/**/*", "package.json"],
-    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
-    "nsis": {
+    "extraResources": [{ "from": "screen-host", "to": "screen-host", "filter": ["*.ps1"] }],
+    "win": { "target": [{ "target": "nsis-web", "arch": ["x64"] }] },
+    "nsisWeb": {
       "oneClick": true,
       "perMachine": true,
       "allowElevation": true,
       "runAfterFinish": false,
       "deleteAppDataOnUninstall": false,
       "artifactName": "CoreChemScreen-Setup.${ext}",
-      "shortcutName": "CoreChem Screen"
+      "shortcutName": "CoreChem Screen",
+      "include": "build/installer.nsh"
     },
     "publish": [{ "provider": "github", "owner": "corecheminc", "repo": "corechem-screen", "releaseType": "release" }]
   }

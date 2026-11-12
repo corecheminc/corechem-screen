@@ -1,0 +1,111 @@
+# End-to-end install test on a real Windows machine, without publishing anything:
+#  1. a "TV PC" as it is in the field: app 0.1.7 (the real released installer), the setup script's config.json, and
+#     the OLD updater (test/old-update-screen.ps1 = what the TVs ran on 2026-11-11: Invoke-WebRequest, 20-min task)
+#     registered as the SYSTEM task "CoreChem Screen update";
+#  2. this build as a web installer whose package comes from a local server instead of the GitHub release;
+#  3. the OLD updater, run by the task as SYSTEM, must install this build, and the install's post-install step must
+#     replace the updater with screen-host/update-screen.ps1;
+#  4. post-install creates the task when it is missing / sets its 60-min limit when it is idle;
+#  5. the new updater puts a wrong clock right (from GitHub's Date header).
+name: Install test (Windows)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PKG: http://127.0.0.1:8765/
+      ROOT: C:\ProgramData\CoreChemScreen
+      TASK: CoreChem Screen update
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm run check
+      - name: Build the web installer (package served locally)
+        shell: pwsh
+        run: npx electron-builder --win --publish never "-c.nsisWeb.appPackageUrl=$env:PKG"
+      - name: Serve the build like a GitHub release (latest.yml, CoreChemScreen-Setup.exe, the .nsis.7z)
+        shell: pwsh
+        run: |
+          Start-Process python -ArgumentList '-m','http.server','8765','--bind','127.0.0.1','--directory','dist\nsis-web' -WindowStyle Hidden
+          Start-Sleep 3
+          (Invoke-WebRequest "$($env:PKG)latest.yml" -UseBasicParsing).Content
+
+      - name: A TV PC as in the field - app 0.1.7, config.json, the OLD updater as the SYSTEM task
+        shell: powershell
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $inst = "$env:TEMP\old-setup.exe"
+          (New-Object Net.WebClient).DownloadFile('https://github.com/corecheminc/corechem-screen/releases/download/v0.1.7/CoreChemScreen-Setup.exe', $inst)
+          $p = Start-Process $inst -ArgumentList '/S' -Wait -PassThru
+          $exe = "$env:ProgramFiles\CoreChem Screen\CoreChem Screen.exe"
+          "installed: $((Get-Item $exe).VersionInfo.ProductVersion) (exit $($p.ExitCode))"
+          New-Item -ItemType Directory -Force $env:ROOT | Out-Null
+          '{"hub":"https://app.corecheminc.com","app":true}' | Set-Content "$env:ROOT\config.json" -Encoding ASCII
+          (Get-Content test\old-update-screen.ps1 -Raw).Replace('https://github.com/corecheminc/corechem-screen/releases/latest/download/', $env:PKG) |
+            Set-Content "$env:ROOT\update-screen.ps1" -Encoding ASCII
+          $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:ROOT\update-screen.ps1`""
+          $tr = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(6) -RepetitionInterval (New-TimeSpan -Minutes 15)
+          $pr = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+          $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
+          Register-ScheduledTask -TaskName $env:TASK -Action $a -Trigger $tr -Principal $pr -Settings $s -Force | Out-Null
+          "task limit: $((Get-ScheduledTask $env:TASK).Settings.ExecutionTimeLimit)"
+
+      - name: The OLD updater (SYSTEM task) installs this build
+        shell: powershell
+        run: |
+          Start-ScheduledTask -TaskName $env:TASK
+          $t0 = Get-Date
+          do { Start-Sleep 10; $st = (Get-ScheduledTask $env:TASK).State } while ($st -eq 'Running' -and ((Get-Date) - $t0).TotalMinutes -lt 25)
+          "task finished in $([int]((Get-Date) - $t0).TotalSeconds) s, last result $((Get-ScheduledTaskInfo $env:TASK).LastTaskResult)"
+          Get-Content "$env:ROOT\update.log"
+          $v = (Get-Item "$env:ProgramFiles\CoreChem Screen\CoreChem Screen.exe").VersionInfo.ProductVersion
+          $want = (Get-Content package.json | ConvertFrom-Json).version
+          if (-not $v.StartsWith($want)) { throw "installed $v, expected $want" }
+          if (-not (Test-Path "$env:ProgramFiles\CoreChem Screen\resources\screen-host\post-install.ps1")) { throw 'screen-host not installed' }
+          if ((Get-FileHash "$env:ROOT\update-screen.ps1").Hash -ne (Get-FileHash screen-host\update-screen.ps1).Hash) { throw 'updater script was NOT replaced by the release copy' }
+          if (-not (Select-String "$env:ROOT\update.log" -Pattern 'post-install: updater script refreshed' -Quiet)) { throw 'no post-install line in update.log' }
+          "OK: $v installed by the old updater; updater script replaced"
+
+      - name: post-install fixes an idle task's limit, and creates a missing task
+        shell: powershell
+        run: |
+          $pi = "$env:ProgramFiles\CoreChem Screen\resources\screen-host\post-install.ps1"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $pi
+          $lim = (Get-ScheduledTask $env:TASK).Settings.ExecutionTimeLimit
+          if ($lim -ne 'PT1H') { throw "limit is $lim, expected PT1H" }
+          Unregister-ScheduledTask -TaskName $env:TASK -Confirm:$false
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $pi
+          $t = Get-ScheduledTask $env:TASK
+          if ($t.Principal.UserId -ne 'SYSTEM' -or $t.Settings.ExecutionTimeLimit -ne 'PT1H') { throw 'task not re-created as expected' }
+          if ($t.Actions[0].Arguments -notmatch [regex]::Escape("$env:ROOT\update-screen.ps1")) { throw "task runs $($t.Actions[0].Arguments)" }
+          Get-Content "$env:ROOT\update.log" -Tail 5
+          'OK: limit fixed; missing task re-created'
+
+      - name: The new updater puts a wrong clock right (and leaves a current app alone)
+        shell: powershell
+        run: |
+          Set-Date -Adjust (New-TimeSpan -Hours 1) | Out-Null
+          "clock now $((Get-Date).ToUniversalTime().ToString('s'))Z (1 h fast)"
+          Start-ScheduledTask -TaskName $env:TASK
+          $t0 = Get-Date
+          do { Start-Sleep 5; $st = (Get-ScheduledTask $env:TASK).State } while ($st -eq 'Running' -and ((Get-Date) - $t0).TotalMinutes -lt 5)
+          Get-Content "$env:ROOT\update.log" -Tail 5
+          if (-not (Select-String "$env:ROOT\update.log" -Pattern 'clock was .* s off' -Quiet)) { throw 'clock was not corrected' }
+          $off = ((Get-Date).ToUniversalTime() - [DateTime]::Parse((Invoke-WebRequest https://github.com -Method Head -UseBasicParsing).Headers['Date']).ToUniversalTime()).TotalSeconds
+          "clock offset after: $([int]$off) s"
+          if ([Math]::Abs($off) -gt 120) { throw 'clock still off' }
+          if (Select-String "$env:ROOT\update.log" -Pattern 'updating 0\.1\.8' -Quiet) { throw 'tried to reinstall a current app' }
+          'OK: clock corrected'
+
+      - if: always()
+        name: update.log
+        shell: powershell
+        run: Get-Content "$env:ROOT\update.log" -ErrorAction SilentlyContinue
