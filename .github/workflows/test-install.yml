@@ -156,6 +156,7 @@ jobs:
       - name: The new updater puts a wrong clock right (and leaves a current app alone)
         shell: powershell
         run: |
+          $before = @(Get-Content "$env:ROOT\update.log").Count
           Set-Date -Adjust (New-TimeSpan -Hours 1) | Out-Null
           "clock now $((Get-Date).ToUniversalTime().ToString('s'))Z (1 h fast)"
           Start-ScheduledTask -TaskName $env:TASK
@@ -166,7 +167,7 @@ jobs:
           $off = ((Get-Date).ToUniversalTime() - [DateTime]::Parse((Invoke-WebRequest https://github.com -Method Head -UseBasicParsing).Headers['Date']).ToUniversalTime()).TotalSeconds
           "clock offset after: $([int]$off) s"
           if ([Math]::Abs($off) -gt 120) { throw 'clock still off' }
-          if (Select-String "$env:ROOT\update.log" -Pattern 'updating 0\.1\.8' -Quiet) { throw 'tried to reinstall a current app' }
+          if (@(Get-Content "$env:ROOT\update.log" | Select-Object -Skip $before) -match '^\S+ updating ') { throw 'tried to reinstall a current app' }
           'OK: clock corrected'
 
       - if: always()
