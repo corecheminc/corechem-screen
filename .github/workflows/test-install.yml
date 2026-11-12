@@ -74,6 +74,16 @@ jobs:
           $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
           Register-ScheduledTask -TaskName $env:TASK -Action $a -Trigger $tr -Principal $pr -Settings $s -Force | Out-Null
           "task limit: $((Get-ScheduledTask $env:TASK).Settings.ExecutionTimeLimit)"
+          # What someone at a TV could plant while the folder is still open (security review R1): a folder link and a
+          # file link to a deliberately locked folder. The lock-down must remove the links and never touch the target.
+          New-Item -ItemType Directory C:\locked-target | Out-Null
+          'x' | Set-Content C:\locked-target\f.txt
+          icacls C:\locked-target /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+          icacls C:\locked-target /setowner '*S-1-5-18' /T | Out-Null
+          cmd /c mklink /J "$env:ROOT\x" C:\locked-target
+          cmd /c mklink "$env:ROOT\s.txt" C:\locked-target\f.txt
+          (Get-Acl C:\locked-target).Sddl | Set-Content "$env:TEMP\target-before.sddl"
+          (Get-Acl C:\locked-target\f.txt).Sddl | Set-Content "$env:TEMP\file-before.sddl"
 
       - name: The OLD updater exits silently (the 2026-11-11 bug, on record)
         shell: powershell
@@ -136,6 +146,33 @@ jobs:
           $v = (Get-Item "$env:ProgramFiles\CoreChem Screen\CoreChem Screen.exe").VersionInfo.ProductVersion
           $want = (Get-Content package.json | ConvertFrom-Json).version
           if (-not $v.StartsWith($want)) { throw "version changed to $v" }
+          'OK: refused'
+
+      - name: Planted links were removed and their target left alone (security review R1)
+        shell: powershell
+        run: |
+          if (Test-Path "$env:ROOT\x") { throw 'folder link still there' }
+          if (Test-Path "$env:ROOT\s.txt") { throw 'file link still there' }
+          if ((Get-Acl C:\locked-target).Sddl -ne (Get-Content "$env:TEMP\target-before.sddl")) { icacls C:\locked-target; throw 'link TARGET folder ACL/owner changed' }
+          if ((Get-Acl C:\locked-target\f.txt).Sddl -ne (Get-Content "$env:TEMP\file-before.sddl")) { icacls C:\locked-target\f.txt; throw 'link TARGET file ACL/owner changed' }
+          if (-not (Test-Path C:\locked-target\f.txt)) { throw 'link target deleted' }
+          Select-String "$env:ROOT\update.log" -Pattern 'removed link'
+          'OK: links gone, target untouched'
+
+      - name: A folder some user owns is refused, not taken over
+        shell: powershell
+        run: |
+          $pw = ConvertTo-SecureString ('Tv' + [guid]::NewGuid().ToString('N') + '!a1') -AsPlainText -Force
+          $u = New-LocalUser -Name tvuser -Password $pw -AccountNeverExpires
+          $updater = "$env:ROOT\update-screen.ps1"
+          $before = (Get-FileHash $updater).Hash
+          icacls $env:ROOT /setowner tvuser | Out-Null
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramFiles\CoreChem Screen\resources\screen-host\post-install.ps1"
+          $out
+          icacls $env:ROOT /setowner '*S-1-5-32-544' | Out-Null
+          Remove-LocalUser tvuser
+          if (-not ($out -match 'refusing')) { throw 'a user-owned folder was not refused' }
+          if ((Get-FileHash $updater).Hash -ne $before) { throw 'updater touched in a user-owned folder' }
           'OK: refused'
 
       - name: post-install fixes an idle task's limit, and creates a missing task

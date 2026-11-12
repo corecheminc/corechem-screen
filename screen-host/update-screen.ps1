@@ -71,7 +71,7 @@ try {
   $h = [Security.Cryptography.SHA512]::Create()
   $fs = [IO.File]::OpenRead($inst)
   try { $calc = [Convert]::ToBase64String($h.ComputeHash($fs)) } finally { $fs.Dispose() }
-  if ($calc -ne $sha) { throw 'download sha512 does not match latest.yml - not installing' }
+  if ($calc -cne $sha) { throw 'download sha512 does not match latest.yml - not installing' }
   L 'sha512 ok'
   Get-CimInstance Win32_Process -Filter "Name='CoreChem Screen.exe'" -ErrorAction SilentlyContinue |
     ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null }
