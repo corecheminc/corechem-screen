@@ -411,6 +411,32 @@ function setupUpdates() {
   setInterval(check, 6 * 3600_000);
 }
 
+// The updater's own log (C:\ProgramData\CoreChemScreen\update.log, written by the SYSTEM task and each install's
+// post-install step) is forwarded into this log, so it reaches the Hub (Screens → Control → Log, "updater:") and
+// nobody has to sit at a TV to learn why an update did not land (2026-11-11: no TV installed 0.1.7, and nothing on
+// the Hub said why). New lines only — the read position is kept in %LOCALAPPDATA%\CoreChemScreen\update-log-pos.
+const UPDATE_LOG = path.join(process.env.ProgramData || 'C:\\ProgramData', 'CoreChemScreen', 'update.log');
+const UPDATE_LOG_POS = path.join(LOG_DIR, 'update-log-pos');
+function forwardUpdaterLog() {
+  try {
+    const size = fs.statSync(UPDATE_LOG).size;
+    let pos = NaN;
+    try { pos = Number(fs.readFileSync(UPDATE_LOG_POS, 'utf8')); } catch { /* first run */ }
+    const saved = Number.isFinite(pos) && pos >= 0 && pos <= size;   // else first run / rotated: just the tail
+    if (saved && pos === size) return;
+    const from = Math.max(saved ? pos : 0, size - (saved ? 64 * 1024 : 4096));
+    const len = size - from;
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(UPDATE_LOG, 'r');
+    try { fs.readSync(fd, buf, 0, len, from); } finally { fs.closeSync(fd); }
+    const lines = buf.toString('utf8').split(/\r?\n/).filter(Boolean);
+    if (from > 0 && !(saved && from === pos)) lines.shift();   // started mid-line: drop the cut first line
+    for (const l of lines.slice(-50)) log('updater:', l.slice(0, 300));
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.writeFileSync(UPDATE_LOG_POS, String(size));
+  } catch { /* no update.log on this PC yet */ }
+}
+
 // ---------------------------------------------------------------- lifecycle
 app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 app.on('window-all-closed', () => app.quit());        // the launcher (setup script) starts us again
@@ -420,4 +446,6 @@ app.whenReady().then(() => {
   createWindow();
   setupUpdates();
   log('CoreChem Screen', app.getVersion(), '→', cfg.hub);
+  setTimeout(forwardUpdaterLog, 20_000);              // after the page is up to ship it
+  setInterval(forwardUpdaterLog, 5 * 60_000);
 });

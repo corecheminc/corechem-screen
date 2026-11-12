@@ -16,7 +16,14 @@ permissions:
   contents: write
 
 jobs:
+  # The release replaces the updater on every TV at once, and a broken updater can only be fixed by visiting each TV,
+  # so nothing is built or published unless the install test passes (security review 2026-11-12).
+  test:
+    uses: ./.github/workflows/test-install.yml
+    permissions:
+      contents: read
   build:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

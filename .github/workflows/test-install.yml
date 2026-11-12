@@ -1,0 +1,244 @@
+# End-to-end install test on a real Windows machine, without publishing anything:
+#  1. a "TV PC" as it is in the field: app 0.1.7 (the real released installer), the setup script's config.json, and
+#     the OLD updater (test/old-update-screen.ps1 = what the TVs ran on 2026-11-11) registered as the SYSTEM task
+#     "CoreChem Screen update"; this build is served from a local server the way GitHub serves a release
+#     (application/octet-stream);
+#  2. the OLD updater exits without a word - the 2026-11-11 bug: PowerShell 5.1 hands an octet-stream latest.yml
+#     back as BYTES, the version match fails, exit 0. No TV ever updated itself; this step keeps that on record;
+#  3. the updater a setup run writes (screen-host/update-screen.ps1) installs this build as SYSTEM, and the install's
+#     post-install step puts the release's own copy of the updater in place;
+#  4. post-install creates the task when it is missing / sets its 60-min limit when it is idle;
+#  5. the new updater puts a wrong clock right (from GitHub's Date header).
+name: Install test (Windows)
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:          # release.yml runs this before it builds and publishes anything
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PKG: http://127.0.0.1:8765/
+      ROOT: C:\ProgramData\CoreChemScreen
+      TASK: CoreChem Screen update
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm run check
+      - name: Build the installer
+        shell: pwsh
+        run: npx electron-builder --win --publish never
+      - name: Serve the build like a GitHub release (latest.yml + CoreChemScreen-Setup.exe as octet-stream)
+        shell: pwsh
+        run: |
+          Start-Process python -ArgumentList '-m','http.server','8765','--bind','127.0.0.1','--directory','dist' -WindowStyle Hidden
+          # a TAMPERED release on :8766 - newer version, same installer, wrong sha512: must never be installed
+          New-Item -ItemType Directory dist-bad | Out-Null
+          Copy-Item dist\CoreChemScreen-Setup.exe dist-bad\
+          $y = Get-Content dist\latest.yml -Raw
+          $y = $y -replace '(?m)^version:.*$', 'version: 9.9.9' -replace 'sha512: \S+', ('sha512: ' + [Convert]::ToBase64String([byte[]](1..64)))
+          Set-Content dist-bad\latest.yml $y -NoNewline
+          Start-Process python -ArgumentList '-m','http.server','8766','--bind','127.0.0.1','--directory','dist-bad' -WindowStyle Hidden
+          Start-Sleep 3
+          $r = Invoke-WebRequest "$($env:PKG)latest.yml" -UseBasicParsing
+          "Content-Type: $($r.Headers['Content-Type'])"
+          [Text.Encoding]::UTF8.GetString($r.RawContentStream.ToArray())
+
+      - name: A TV PC as in the field - app 0.1.7, config.json, the OLD updater as the SYSTEM task
+        shell: powershell
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $inst = "$env:TEMP\old-setup.exe"
+          (New-Object Net.WebClient).DownloadFile('https://github.com/corecheminc/corechem-screen/releases/download/v0.1.7/CoreChemScreen-Setup.exe', $inst)
+          $p = Start-Process $inst -ArgumentList '/S' -Wait -PassThru
+          $exe = "$env:ProgramFiles\CoreChem Screen\CoreChem Screen.exe"
+          "installed: $((Get-Item $exe).VersionInfo.ProductVersion) (exit $($p.ExitCode))"
+          New-Item -ItemType Directory -Force $env:ROOT | Out-Null
+          '{"hub":"https://app.corecheminc.com","app":true}' | Set-Content "$env:ROOT\config.json" -Encoding ASCII
+          (Get-Content test\old-update-screen.ps1 -Raw).Replace('https://github.com/corecheminc/corechem-screen/releases/latest/download/', $env:PKG) |
+            Set-Content "$env:ROOT\update-screen.ps1" -Encoding ASCII
+          $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$env:ROOT\update-screen.ps1`""
+          $tr = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(6) -RepetitionInterval (New-TimeSpan -Minutes 15)
+          $pr = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+          $s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
+          Register-ScheduledTask -TaskName $env:TASK -Action $a -Trigger $tr -Principal $pr -Settings $s -Force | Out-Null
+          "task limit: $((Get-ScheduledTask $env:TASK).Settings.ExecutionTimeLimit)"
+          # What someone at a TV could plant while the folder is still open (security review R1): a folder link and a
+          # file link to a deliberately locked folder. The lock-down must remove the links and never touch the target.
+          New-Item -ItemType Directory C:\locked-target | Out-Null
+          'x' | Set-Content C:\locked-target\f.txt
+          icacls C:\locked-target /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+          icacls C:\locked-target /setowner '*S-1-5-18' /T | Out-Null
+          cmd /c mklink /J "$env:ROOT\x" C:\locked-target
+          cmd /c mklink "$env:ROOT\s.txt" C:\locked-target\f.txt
+          (Get-Acl C:\locked-target).Sddl | Set-Content "$env:TEMP\target-before.sddl"
+          (Get-Acl C:\locked-target\f.txt).Sddl | Set-Content "$env:TEMP\file-before.sddl"
+
+      - name: The OLD updater exits silently (the 2026-11-11 bug, on record)
+        shell: powershell
+        run: |
+          Start-ScheduledTask -TaskName $env:TASK
+          $t0 = Get-Date
+          do { Start-Sleep 5; $st = (Get-ScheduledTask $env:TASK).State } while ($st -eq 'Running' -and ((Get-Date) - $t0).TotalMinutes -lt 25)
+          "old updater finished in $([int]((Get-Date) - $t0).TotalSeconds) s"
+          $v = (Get-Item "$env:ProgramFiles\CoreChem Screen\CoreChem Screen.exe").VersionInfo.ProductVersion
+          if (-not $v.StartsWith('0.1.7')) { throw "the old updater installed $v - the bug this records is gone?" }
+          "as on the TVs: still $v, update.log present: $(Test-Path "$env:ROOT\update.log")"
+
+      - name: The updater a setup run writes installs this build (SYSTEM task), and the release replaces it
+        shell: powershell
+        run: |
+          (Get-Content screen-host\update-screen.ps1 -Raw).Replace('https://github.com/corecheminc/corechem-screen/releases/latest/download/', $env:PKG) |
+            Set-Content "$env:ROOT\update-screen.ps1" -Encoding ASCII
+          Start-ScheduledTask -TaskName $env:TASK
+          $t0 = Get-Date
+          do { Start-Sleep 10; $st = (Get-ScheduledTask $env:TASK).State } while ($st -eq 'Running' -and ((Get-Date) - $t0).TotalMinutes -lt 25)
+          "task finished in $([int]((Get-Date) - $t0).TotalSeconds) s, last result $((Get-ScheduledTaskInfo $env:TASK).LastTaskResult)"
+          Get-Content "$env:ROOT\update.log"
+          $v = (Get-Item "$env:ProgramFiles\CoreChem Screen\CoreChem Screen.exe").VersionInfo.ProductVersion
+          $want = (Get-Content package.json | ConvertFrom-Json).version
+          if (-not $v.StartsWith($want)) { throw "installed $v, expected $want" }
+          if (-not (Test-Path "$env:ProgramFiles\CoreChem Screen\resources\screen-host\post-install.ps1")) { throw 'screen-host not installed' }
+          if ((Get-FileHash "$env:ROOT\update-screen.ps1").Hash -ne (Get-FileHash screen-host\update-screen.ps1).Hash) { throw 'updater script was NOT replaced by the release copy' }
+          foreach ($pat in 'downloaded .* MB', 'sha512 ok', 'installer exit 0', 'post-install: folder locked down', 'post-install: updater script refreshed') {
+            if (-not (Select-String "$env:ROOT\update.log" -Pattern $pat -Quiet)) { throw "update.log has no '$pat'" }
+          }
+          "OK: $v installed by the SYSTEM task; the release's updater is in place"
+
+      - name: The folder is locked down (only SYSTEM + Administrators can write)
+        shell: powershell
+        run: |
+          $acl = Get-Acl $env:ROOT
+          $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+          if ($owner -ne 'S-1-5-32-544') { throw "owner $owner" }
+          $bad = $acl.Access | Where-Object {
+            $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin 'S-1-5-18', 'S-1-5-32-544' -and
+            ($_.FileSystemRights -band ([Security.AccessControl.FileSystemRights]'Write, Delete, ChangePermissions, TakeOwnership'))
+          }
+          if ($bad) { $bad | Format-Table IdentityReference, FileSystemRights | Out-String; throw 'others can still write' }
+          icacls $env:ROOT
+          if (Get-ChildItem $env:ProgramData -Filter 'CoreChemScreen-dl-*' -Directory) { throw 'download folder left behind' }
+          'OK: locked down, download folder cleaned up'
+
+      - name: A tampered release (wrong sha512) is refused
+        shell: powershell
+        run: |
+          $real = "$env:ROOT\update-screen.ps1"
+          $keep = Get-Content $real -Raw
+          $keep.Replace('https://github.com/corecheminc/corechem-screen/releases/latest/download/', 'http://127.0.0.1:8766/') | Set-Content $real -Encoding ASCII
+          Start-ScheduledTask -TaskName $env:TASK
+          $t0 = Get-Date
+          do { Start-Sleep 5; $st = (Get-ScheduledTask $env:TASK).State } while ($st -eq 'Running' -and ((Get-Date) - $t0).TotalMinutes -lt 10)
+          Set-Content $real $keep -Encoding ASCII -NoNewline
+          Get-Content "$env:ROOT\update.log" -Tail 4
+          if (-not (Select-String "$env:ROOT\update.log" -Pattern 'sha512 does not match' -Quiet)) { throw 'tampered installer was not refused' }
+          $v = (Get-Item "$env:ProgramFiles\CoreChem Screen\CoreChem Screen.exe").VersionInfo.ProductVersion
+          $want = (Get-Content package.json | ConvertFrom-Json).version
+          if (-not $v.StartsWith($want)) { throw "version changed to $v" }
+          'OK: refused'
+
+      - name: Planted links were removed and their target left alone (security review R1)
+        shell: powershell
+        run: |
+          if (Test-Path "$env:ROOT\x") { throw 'folder link still there' }
+          if (Test-Path "$env:ROOT\s.txt") { throw 'file link still there' }
+          if ((Get-Acl C:\locked-target).Sddl -ne (Get-Content "$env:TEMP\target-before.sddl")) { icacls C:\locked-target; throw 'link TARGET folder ACL/owner changed' }
+          if ((Get-Acl C:\locked-target\f.txt).Sddl -ne (Get-Content "$env:TEMP\file-before.sddl")) { icacls C:\locked-target\f.txt; throw 'link TARGET file ACL/owner changed' }
+          if (-not (Test-Path C:\locked-target\f.txt)) { throw 'link target deleted' }
+          Select-String "$env:ROOT\update.log" -Pattern 'removed link'
+          'OK: links gone, target untouched'
+
+      - name: A folder some user owns is refused, not taken over
+        shell: powershell
+        run: |
+          $pw = ConvertTo-SecureString ('Tv' + [guid]::NewGuid().ToString('N') + '!a1') -AsPlainText -Force
+          $u = New-LocalUser -Name tvuser -Password $pw -AccountNeverExpires
+          $updater = "$env:ROOT\update-screen.ps1"
+          $before = (Get-FileHash $updater).Hash
+          icacls $env:ROOT /setowner tvuser | Out-Null
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramFiles\CoreChem Screen\resources\screen-host\post-install.ps1"
+          $out
+          icacls $env:ROOT /setowner '*S-1-5-32-544' | Out-Null
+          Remove-LocalUser tvuser
+          if (-not ($out -match 'refusing')) { throw 'a user-owned folder was not refused' }
+          if ((Get-FileHash $updater).Hash -ne $before) { throw 'updater touched in a user-owned folder' }
+          'OK: refused'
+
+      - name: The setup script's one-time lock-down (test/setup-lock-block.ps1 = a verbatim copy from the Hub setup)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Say($m, $c = 'Gray') { Write-Host $m }
+          function Check($Root, $what) {
+            $acl = Get-Acl -LiteralPath $Root
+            if ((Get-Item -LiteralPath $Root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$what : still a link" }
+            if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') { throw "$what : owner" }
+            if (-not $acl.AreAccessRulesProtected) { throw "$what : inherits" }
+            $bad = $acl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -notin 'S-1-5-18', 'S-1-5-32-544' -and
+              ($_.FileSystemRights -band ([Security.AccessControl.FileSystemRights]'Write, Delete, ChangePermissions, TakeOwnership')) }
+            if ($bad) { throw "$what : others can write" }
+            "OK: $what"
+          }
+          $Root = 'C:\ProgramData\CCS-setup-test'
+          . .\test\setup-lock-block.ps1; Check $Root 'new folder'
+          'cfg' | Set-Content "$Root\config.json"
+          cmd /c mklink /J "$Root\x" C:\locked-target | Out-Null
+          $tb = (Get-Acl C:\locked-target).Sddl
+          . .\test\setup-lock-block.ps1; Check $Root 'existing folder with a planted link'
+          if (Test-Path "$Root\x") { throw 'planted link kept' }
+          if ((Get-Acl C:\locked-target).Sddl -ne $tb) { throw 'link target changed' }
+          if (-not (Test-Path "$Root\config.json")) { throw 'a legitimate file was removed' }
+          cmd /c rd /s /q $Root
+          cmd /c mklink /J $Root C:\locked-target | Out-Null
+          . .\test\setup-lock-block.ps1; Check $Root 'folder that was a link'
+          if ((Get-Acl C:\locked-target).Sddl -ne $tb) { throw 'link target changed' }
+          if (-not (Test-Path C:\locked-target\f.txt)) { throw 'link target emptied' }
+          cmd /c rd /s /q $Root
+
+      - name: post-install fixes an idle task's limit, and creates a missing task
+        shell: powershell
+        run: |
+          $pi = "$env:ProgramFiles\CoreChem Screen\resources\screen-host\post-install.ps1"
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $pi
+          $lim = (Get-ScheduledTask $env:TASK).Settings.ExecutionTimeLimit
+          if ($lim -ne 'PT1H') { throw "limit is $lim, expected PT1H" }
+          Unregister-ScheduledTask -TaskName $env:TASK -Confirm:$false
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $pi
+          $t = Get-ScheduledTask $env:TASK
+          if ($t.Principal.UserId -ne 'SYSTEM' -or $t.Settings.ExecutionTimeLimit -ne 'PT1H') { throw 'task not re-created as expected' }
+          if ($t.Actions[0].Arguments -notmatch [regex]::Escape("$env:ROOT\update-screen.ps1")) { throw "task runs $($t.Actions[0].Arguments)" }
+          Get-Content "$env:ROOT\update.log" -Tail 5
+          'OK: limit fixed; missing task re-created'
+
+      - name: The new updater puts a wrong clock right (and leaves a current app alone)
+        shell: powershell
+        run: |
+          $before = @(Get-Content "$env:ROOT\update.log").Count
+          Set-Date -Adjust (New-TimeSpan -Hours 1) | Out-Null
+          "clock now $((Get-Date).ToUniversalTime().ToString('s'))Z (1 h fast)"
+          Start-ScheduledTask -TaskName $env:TASK
+          $t0 = Get-Date
+          do { Start-Sleep 5; $st = (Get-ScheduledTask $env:TASK).State } while ($st -eq 'Running' -and ((Get-Date) - $t0).TotalMinutes -lt 5)
+          Get-Content "$env:ROOT\update.log" -Tail 5
+          if (-not (Select-String "$env:ROOT\update.log" -Pattern 'clock was .* s off' -Quiet)) { throw 'clock was not corrected' }
+          $off = ((Get-Date).ToUniversalTime() - [DateTime]::Parse((Invoke-WebRequest https://github.com -Method Head -UseBasicParsing).Headers['Date']).ToUniversalTime()).TotalSeconds
+          "clock offset after: $([int]$off) s"
+          if ([Math]::Abs($off) -gt 120) { throw 'clock still off' }
+          if (@(Get-Content "$env:ROOT\update.log" | Select-Object -Skip $before) -match '^\S+ updating ') { throw 'tried to reinstall a current app' }
+          'OK: clock corrected'
+
+      - if: always()
+        name: update.log
+        shell: powershell
+        run: Get-Content "$env:ROOT\update.log" -ErrorAction SilentlyContinue
